@@ -1,8 +1,9 @@
 """
 Maintenance-ops sample agent - structured-output loop.
 
-Uses OpenAI structured output (response_format) with a Pydantic discriminated
-union of all available API requests. The MaintenanceClient.dispatch() method
+Uses OpenAI structured output (response_format) with provider-specific
+Pydantic schema variants over all available API requests. The
+MaintenanceClient.dispatch() method
 handles routing - no manual tool dispatcher needed.
 
 OpenAI and OpenRouter are supported out of the box through the OpenAI SDK.
@@ -68,9 +69,16 @@ Action = Union[
     Req_Respond,
 ]
 
+# OpenRouter and many non-OpenAI models are more reliable with explicit
+# discriminator metadata on unions.
+DiscriminatedAction = Annotated[
+    Action,
+    Field(discriminator="type"),
+]
+
 
 class NextStep(BaseModel):
-    """Structured output returned by the LLM on each reasoning step."""
+    """OpenAI-compatible structured output schema."""
 
     current_state: str = Field(..., description="Brief summary of what you know so far")
     plan: Annotated[List[str], MinLen(1), MaxLen(5)] = Field(
@@ -81,6 +89,42 @@ class NextStep(BaseModel):
         ...,
         description="The next API call to execute",
     )
+
+
+class NextStepDiscriminated(BaseModel):
+    """Structured output schema with explicit union discriminator metadata."""
+
+    current_state: str = Field(..., description="Brief summary of what you know so far")
+    plan: List[str]= Field(
+        ..., description="Remaining 3 steps to complete the task (most important first)"
+    )
+    task_completed: bool = Field(False, description="Set to true only when calling respond")
+    function: DiscriminatedAction = Field(
+        ...,
+        description="The next API call to execute",
+    )
+
+
+def _response_model_for_provider(provider: str) -> type[BaseModel]:
+    # OpenAI response_format rejects oneOf in this schema position, while
+    # OpenRouter generally benefits from discriminator+oneOf for reliability.
+    return NextStep if provider == "openai" else NextStepDiscriminated
+
+
+def _to_responses_input(log: list[dict]) -> list[dict]:
+    """Convert internal chat-style log into Responses API input messages."""
+    items: list[dict] = []
+    for msg in log:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role in {"system", "developer"}:
+            items.append({"role": "developer", "content": content})
+        elif role in {"user", "assistant"}:
+            items.append({"role": role, "content": content})
+        elif role == "tool":
+            tool_call_id = msg.get("tool_call_id", "tool")
+            items.append({"role": "user", "content": f"[tool:{tool_call_id}]\n{content}"})
+    return items
 
 
 SYSTEM_PROMPT = """\
@@ -135,18 +179,26 @@ def run_agent(
 
     log.append({"role": "user", "content": task.task_text})
 
+    response_model = _response_model_for_provider(llm_config.provider)
+
     for i in range(MAX_STEPS):
         step_id = f"step_{i + 1}"
         print(f"  Step {i + 1}... ", end="", flush=True)
 
         t0 = time.time()
         try:
-            resp = client.beta.chat.completions.parse(
-                model=llm_config.model,
-                response_format=NextStep,
-                messages=log,
-                max_completion_tokens=4096,
-            )
+            if llm_config.provider == "openai":
+                resp = client.responses.parse(
+                    model=llm_config.model,
+                    input=_to_responses_input(log),
+                    text_format=response_model,
+                )
+            else:
+                resp = client.beta.chat.completions.parse(
+                    model=llm_config.model,
+                    response_format=response_model,
+                    messages=log,
+                )
         except Exception as exc:
             raise RuntimeError(
                 "LLM request failed for "
@@ -156,7 +208,15 @@ def run_agent(
             ) from exc
         elapsed_ms = int((time.time() - t0) * 1000)
 
-        step = resp.choices[0].message.parsed
+        if llm_config.provider == "openai":
+            step = resp.output_parsed
+            prompt_tokens = resp.usage.input_tokens if resp.usage else None
+            completion_tokens = resp.usage.output_tokens if resp.usage else None
+        else:
+            step = resp.choices[0].message.parsed
+            prompt_tokens = resp.usage.prompt_tokens if resp.usage else None
+            completion_tokens = resp.usage.completion_tokens if resp.usage else None
+
         if step is None:
             print(f"{CLI_RED}LLM returned unparseable response{CLI_CLR}")
             break
@@ -173,8 +233,8 @@ def run_agent(
                 completion=step.plan[0],
                 model=llm_config.model,
                 duration_sec=(time.time() - t0),
-                prompt_tokens=resp.usage.prompt_tokens if resp.usage else None,
-                completion_tokens=resp.usage.completion_tokens if resp.usage else None,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
             )
         except Exception:
             pass
