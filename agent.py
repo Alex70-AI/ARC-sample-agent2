@@ -18,6 +18,7 @@ from annotated_types import MaxLen, MinLen
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
+from execution_log import ExecutionLog
 from ogchallenge_client import CoreClient, MaintenanceClient, TaskInfo, ApiException
 from ogchallenge_client.dtos import (
     Req_System,
@@ -159,6 +160,8 @@ def run_agent(
     task: TaskInfo,
     *,
     llm_config: LLMConfig,
+    execution_log: ExecutionLog | None = None,
+    log_task_index: int | None = None,
 ) -> None:
     """Run the agent for a single task."""
 
@@ -176,6 +179,8 @@ def run_agent(
     for label, text in bootstrap_log:
         print(f"  {CLI_GREEN}AUTO {label}{CLI_CLR}: {text[:120]}")
         log.append({"role": "user", "content": f"[{label}]\n{text}"})
+        if execution_log is not None and log_task_index is not None:
+            execution_log.add_bootstrap(log_task_index, label, text)
 
     log.append({"role": "user", "content": task.task_text})
 
@@ -219,13 +224,28 @@ def run_agent(
 
         if step is None:
             print(f"{CLI_RED}LLM returned unparseable response{CLI_CLR}")
+            if execution_log is not None and log_task_index is not None:
+                execution_log.add_error("LLM returned unparseable response")
             break
 
         fn = step.function
         fn_type = fn.type
+        fn_args_data = fn.model_dump(exclude_none=True, exclude={"type"})
         fn_args = fn.model_dump_json(exclude_none=True, exclude={"type"})
         print(f"{CLI_CYAN}{fn_type}{CLI_CLR} - {step.plan[0]}  ({elapsed_ms}ms)")
         print(f"    {CLI_YELLOW}args:{CLI_CLR} {fn_args[:300]}")
+        log_step_index = None
+        if execution_log is not None and log_task_index is not None:
+            log_step_index = execution_log.add_step(
+                log_task_index,
+                step_number=i + 1,
+                current_state=step.current_state,
+                plan=step.plan,
+                function_type=fn_type,
+                function_args=fn_args_data,
+                llm_duration_ms=elapsed_ms,
+                usage=resp.usage,
+            )
 
         try:
             api.log_llm(
@@ -256,16 +276,40 @@ def run_agent(
             result = maint.dispatch(fn)
             result_text = result.model_dump_json(exclude_none=True)
             print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
+            if execution_log is not None and log_task_index is not None and log_step_index is not None:
+                execution_log.finish_step(
+                    log_task_index,
+                    log_step_index,
+                    platform_result=result,
+                )
         except ApiException as exc:
             result_text = f'{{"error": "{exc.api_error.error}", "code": "{exc.api_error.code}"}}'
             print(f"    {CLI_RED}ERR: {exc.api_error.error}{CLI_CLR}")
+            if execution_log is not None and log_task_index is not None and log_step_index is not None:
+                execution_log.finish_step(
+                    log_task_index,
+                    log_step_index,
+                    error={
+                        "error": exc.api_error.error,
+                        "code": exc.api_error.code,
+                        "status_code": exc.status_code,
+                    },
+                )
         except Exception as exc:
             result_text = f'{{"error": "{exc}"}}'
             print(f"    {CLI_RED}ERR: {exc}{CLI_CLR}")
+            if execution_log is not None and log_task_index is not None and log_step_index is not None:
+                execution_log.finish_step(
+                    log_task_index,
+                    log_step_index,
+                    error=str(exc),
+                )
 
         log.append({"role": "tool", "content": result_text, "tool_call_id": step_id})
 
         if isinstance(fn, Req_Respond):
+            if execution_log is not None and log_task_index is not None:
+                execution_log.set_respond(log_task_index, fn)
             print(f"\n  {CLI_GREEN}Agent responded: {fn.outcome}{CLI_CLR}")
             print(f"  {CLI_BLUE}{fn.message}{CLI_CLR}")
             if fn.ground_refs:

@@ -29,6 +29,7 @@ load_dotenv()
 from ogchallenge_client import CoreClient, ApiException
 
 from agent import LLMConfig, make_llm_client, run_agent
+from execution_log import ExecutionLog
 
 DEFAULT_ARC_BASE_URL = "https://agentreliabilitychallenge.com"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -161,6 +162,13 @@ def _preflight_llm(llm_config: LLMConfig) -> None:
 
 def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
     """Start a full session and run all tasks."""
+    execution_log = ExecutionLog(
+        mode="batch",
+        workspace=workspace,
+        llm_provider=llm_config.provider,
+        llm_model=llm_config.model,
+    )
+    print(f"Execution log: {execution_log.path}")
     print(
         "Starting session "
         f"(benchmark=maintenance-ops, workspace={workspace!r}, model={llm_config.model!r})..."
@@ -171,6 +179,7 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
         name=f"sample-agent ({llm_config.model})",
         architecture=f"{llm_config.provider} structured-output agent",
     )
+    execution_log.set_session(session)
     print(f"Session ID: {session.session_id}  tasks: {session.task_count}\n")
 
     status = api.session_status(session.session_id)
@@ -178,14 +187,23 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
 
     for task_info in status.tasks:
         print("=" * 60)
+        log_task_index = execution_log.start_task(task_info)
         api.start_task(task_info)
 
         try:
-            run_agent(api, task_info, llm_config=llm_config)
+            run_agent(
+                api,
+                task_info,
+                llm_config=llm_config,
+                execution_log=execution_log,
+                log_task_index=log_task_index,
+            )
         except Exception as exc:
             print(f"  {CLI_RED}ERROR: {exc}{CLI_CLR}")
+            execution_log.finish_task(log_task_index, error=exc)
 
         result = api.complete_task(task_info)
+        execution_log.finish_task(log_task_index, completion=result)
         if result.eval:
             score = result.eval.score
             scores.append((task_info.spec_id, score))
@@ -198,6 +216,11 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
     print("\n" + "=" * 60)
     submitted = api.submit_session(session.session_id)
     print(f"Session submitted - status: {submitted.status}  score: {submitted.score:.2f}")
+    execution_log.data["submission"] = {
+        "status": submitted.status,
+        "score": submitted.score,
+    }
+    execution_log.finish_run()
 
     if scores:
         print()
@@ -210,17 +233,33 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
 
 def run_single_task(api: CoreClient, spec_id: str, llm_config: LLMConfig) -> None:
     """Start a standalone task by spec_id (for development/testing)."""
+    execution_log = ExecutionLog(
+        mode="single",
+        llm_provider=llm_config.provider,
+        llm_model=llm_config.model,
+    )
+    print(f"Execution log: {execution_log.path}")
     print(
         f"Starting standalone task: spec={spec_id!r}, provider={llm_config.provider!r}, model={llm_config.model!r}\n"
     )
     task_info = api.start_new_task(benchmark="maintenance-ops", spec_id=spec_id)
+    log_task_index = execution_log.start_task(task_info)
 
     try:
-        run_agent(api, task_info, llm_config=llm_config)
+        run_agent(
+            api,
+            task_info,
+            llm_config=llm_config,
+            execution_log=execution_log,
+            log_task_index=log_task_index,
+        )
     except Exception as exc:
         print(f"{CLI_RED}ERROR: {exc}{CLI_CLR}")
+        execution_log.finish_task(log_task_index, error=exc)
 
     result = api.complete_task(task_info)
+    execution_log.finish_task(log_task_index, completion=result)
+    execution_log.finish_run()
     if result.eval:
         score = result.eval.score
         style = CLI_GREEN if score >= 0.8 else CLI_RED
