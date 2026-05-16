@@ -184,6 +184,7 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
 
     status = api.session_status(session.session_id)
     scores = []
+    benchmark_context: dict[str, str] = {}
 
     for task_info in status.tasks:
         print("=" * 60)
@@ -197,6 +198,7 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
                 llm_config=llm_config,
                 execution_log=execution_log,
                 log_task_index=log_task_index,
+                benchmark_context=benchmark_context,
             )
         except Exception as exc:
             print(f"  {CLI_RED}ERROR: {exc}{CLI_CLR}")
@@ -246,12 +248,14 @@ def run_single_task(api: CoreClient, spec_id: str, llm_config: LLMConfig) -> Non
     log_task_index = execution_log.start_task(task_info)
 
     try:
+        benchmark_context: dict[str, str] = {}
         run_agent(
             api,
             task_info,
             llm_config=llm_config,
             execution_log=execution_log,
             log_task_index=log_task_index,
+            benchmark_context=benchmark_context,
         )
     except Exception as exc:
         print(f"{CLI_RED}ERROR: {exc}{CLI_CLR}")

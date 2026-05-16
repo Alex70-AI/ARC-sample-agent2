@@ -1,60 +1,51 @@
 # AGENTS.md
 
-## Task Approach
+## Repository Role
 
-For each task, first identify:
+This file is for humans and coding agents working on this repository. Runtime
+benchmark behavior for the ARC maintenance agent lives in `ARC_AGENT.md` and is
+loaded by `agent.py`.
 
-- requested outcome
-- current role
-- relevant entity types
-- whether the task requires lookup, write action, refusal, or clarification
+## Development Rules
 
-Form a brief plan before API calls. Do not rush into fixed searches, fixed wiki reads, or writes.
+- Keep benchmark/runtime prompt guidance out of this file unless it is also
+  needed by repository maintainers.
+- Put ARC task-solving guidance in `ARC_AGENT.md`.
+- After prompt or agent-loop changes, run at least:
 
-## No Hardcoded Task Recipes
+```bash
+python -m py_compile agent.py main.py
+```
 
-Do not solve by spec-specific heuristics.
+- Do not commit secrets from `.env` or logs containing credentials.
+- Preserve execution logs unless the user explicitly asks to delete them.
 
-Avoid:
+## Post-Batch Feedback Loop
 
-- fixed instructions like "for task X, read document Y"
-- hardcoded entity IDs
-- fixed risk/status/work-center decisions
-- assuming one search result is correct without verification
-- treating spec IDs as solutions
+After a batch run, analyze recent execution logs before changing runtime
+guidance:
 
-Use task text, system context, API data, and relevant retrieved documentation.
+- Discover logs by reading `logs/*.json`, excluding `*_summary.json`, and
+  parsing JSON content. Do not assume a specific filename pattern.
+- Read logs with UTF-8 BOM tolerance, for example `encoding="utf-8-sig"`.
+- Identify batch logs by JSON field `mode == "batch"` and sort by JSON
+  `started_at`, not by filename or filesystem modified time.
+- Prefer the last 4-5 batch logs when available; if fewer exist, analyze all
+  available batch logs.
+- Include single-task logs only when they are deliberate reruns of a specific
+  failed scenario.
+- Compare failures and successes by task/spec, including search/action
+  sequences, first wrong assumptions, zero-result searches, API errors,
+  outcome/ref correctness, and repeated or missing writes.
+- Summarize failed tasks, improved/regressed tasks, successful search/action
+  patterns, repeated failed patterns, and confidence level for each reusable
+  lesson.
 
-## Before Writes
+Material changes to `ARC_AGENT.md` require human approval:
 
-Before any update/create/reorder/wiki edit:
+- First show the proposed guidance change or concise patch summary.
+- Explain which log evidence supports each change.
+- Do not implement material runtime guidance changes until the user approves.
 
-- confirm the target entity is correct
-- confirm the current role is allowed to perform the action
-- confirm the new value/content is supported by data or policy
-
-If not allowed, refuse with `denied_security`.
-If ambiguous, respond with `none_clarification_needed`.
-
-## API Behavior
-
-Use only available DTO/API actions from `agent.py`.
-
-Do not invent endpoints, fields, statuses, IDs, or policy facts.
-
-Search when IDs are unknown. Get full entity details before updating.
-
-## Final Response
-
-Every task must end with `respond`.
-
-Use the correct outcome:
-
-- `ok_answer`
-- `ok_not_found`
-- `denied_security`
-- `none_clarification_needed`
-- `none_unsupported`
-- `error_internal`
-
-Include `ground_refs` for entities or documents used.
+Never promote exact entity IDs, spec-specific recipes, one-off lucky searches,
+or task answers into `ARC_AGENT.md`.
