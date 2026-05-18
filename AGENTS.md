@@ -20,6 +20,34 @@ python -m py_compile agent.py main.py
 - Do not commit secrets from `.env` or logs containing credentials.
 - Preserve execution logs unless the user explicitly asks to delete them.
 
+## Harness Versioning
+
+Runtime behavior versions are tracked for changes to `agent.py` and
+`ARC_AGENT.md`.
+
+Before editing either file, propose whether the change is:
+
+- no version bump
+- minor version bump
+- major version bump
+
+Explain the reason and proposed new version. Do not change version identifiers
+until the user confirms.
+
+When a version identifier changes, add an entry to
+`logs/harness_versions.md` with the version number, change type, concise summary, reason for the bump, and expected benchmark impact.
+
+Use no version bump for comments, formatting, tests-only changes, non-runtime documentation, and model/cost/pricing changes.
+
+Use a minor version bump for bounded runtime fixes within the existing harness
+architecture, such as retry classification additions, small prompt
+clarifications, preflight improvements, extra logging, or targeted validation
+for an already-known failure mode.
+
+Use a major version bump for changes that alter action selection, dispatch
+eligibility, stopping conditions, repair policy, evidence requirements, write
+gating, provider strategy, or prompt architecture across the benchmark.
+
 ## Post-Batch Feedback Loop
 
 After a batch run, analyze recent execution logs before changing runtime

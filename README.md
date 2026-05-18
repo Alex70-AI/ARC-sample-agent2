@@ -57,10 +57,30 @@ python main.py
 # Run a single task (development mode)
 python main.py --spec notification_raise
 
+# Run multiple configured sessions/tasks from JSON
+python run_batches.py batch_runs.json
+
 # With make
 make run                            # full session
 make task SPEC=notification_raise   # single task
 ```
+
+### Batch Run Plans
+
+Copy `batch_runs.example.json` to `batch_runs.json` and edit the providers,
+models, workspaces, and optional `spec` values.
+
+```bash
+python run_batches.py batch_runs.json --dry-run
+python run_batches.py batch_runs.json
+```
+
+The plan runs stages in order. Runs inside a stage are sequential unless the
+stage sets `"parallel": true`; in that case `max_parallel` controls how many
+child `python main.py` processes are active at once. Parallel runs do not need
+separate terminals. Each child process writes normal ARC execution logs under
+`logs/`, and the orchestrator captures terminal output under
+`logs/batch_orchestrator/`.
 
 ## Environment Variables
 

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command ' *)",
+      "PowerShell(python --version)",
+      "PowerShell(python -c \"import sys; print\\(sys.prefix\\)\")",
+      "Bash(python -c \"import ogchallenge_client; print\\(ogchallenge_client.__file__\\)\")",
+      "Bash(find \"C:\\\\Python-Software\\\\Python3-12-5\\\\Lib\\\\site-packages\\\\ogchallenge_client\" -name \"*.py\" | grep -i dto)",
+      "Read(//c/Python-Software/Python3-12-5/Lib/site-packages/ogchallenge_client/**)"
+    ]
+  }
+}

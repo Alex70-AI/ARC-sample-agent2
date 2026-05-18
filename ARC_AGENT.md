@@ -1,5 +1,7 @@
 # ARC Agent Runtime Guidance
 
+Harness guidance version: 1.4
+
 ## Task Approach
 
 For each task, first identify:
@@ -92,6 +94,17 @@ Before any update/create/reorder/wiki edit:
 - confirm the target entity is correct
 - confirm the current role is allowed to perform the action
 - confirm the new value/content is supported by data or policy
+- compare the drafted write against the task contract: DTO-required fields,
+  task-specific requirements, policy/process evidence, and relevant optional
+  fields discovered from DTOs or wiki context
+
+Build the task contract dynamically from the task text, DTO/API fields, wiki
+tree/search/load results, and API observations. Do not assume a fixed document,
+field, status, ranking, entity, or answer before evidence is loaded.
+
+If a write omits optional DTO fields, make sure loaded evidence or explicit
+reasoning supports why the omitted fields are irrelevant. If not, gather more
+evidence with wiki search/load or API lookups before writing.
 
 After a successful write, do not repeat the same write or try alternate row
 ranges/updates unless the platform rejected the first write. For wiki edits,

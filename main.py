@@ -28,7 +28,7 @@ load_dotenv()
 
 from ogchallenge_client import CoreClient, ApiException
 
-from agent import LLMConfig, make_llm_client, run_agent
+from agent import LLMConfig, make_llm_client, run_agent, smoke_test_llm_protocol
 from execution_log import ExecutionLog
 
 DEFAULT_ARC_BASE_URL = "https://agentreliabilitychallenge.com"
@@ -157,7 +157,18 @@ def _preflight_llm(llm_config: LLMConfig) -> None:
         raise ConfigurationError(
             f"MODEL_ID {llm_config.model!r} was not found for provider {llm_config.provider!r}.{hint}"
         )
-    print(f"{CLI_GREEN}LLM OK{CLI_CLR}")
+    print(f"{CLI_GREEN}LLM model OK{CLI_CLR}")
+
+    print("Checking LLM structured-output protocol ...")
+    try:
+        smoke_test_llm_protocol(llm_config)
+    except Exception as exc:
+        raise ConfigurationError(
+            "LLM protocol smoke test failed. The selected provider/model could not produce "
+            "one valid ARC NextStep through the harness request shape. "
+            f"Original error: {exc}"
+        ) from exc
+    print(f"{CLI_GREEN}LLM protocol OK{CLI_CLR}")
 
 
 def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:

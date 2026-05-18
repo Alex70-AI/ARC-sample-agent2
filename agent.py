@@ -45,6 +45,7 @@ CLI_CLR = "\x1b[0m"
 
 SYSTEM_REFERENCE_PATH = "system_reference/system.md"
 RUNTIME_GUIDANCE_PATH = Path("ARC_AGENT.md")
+HARNESS_VERSION = "1.4"
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,48 @@ class LLMCallResult:
     raw_tool_calls_excerpt: str | None = None
     finish_reason: str | None = None
     error: str | None = None
+
+
+@dataclass
+class TaskContractState:
+    task_text: str
+    current_user: str | None = None
+    role: str | None = None
+    today: str | None = None
+    wiki_tree: str | None = None
+    loaded_docs: dict[str, str] | None = None
+    observations: list[dict[str, Any]] | None = None
+    write_attempts: list[dict[str, Any]] | None = None
+    accepted_writes: list[dict[str, Any]] | None = None
+    work_orders_by_id: dict[str, dict[str, Any]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.loaded_docs is None:
+            self.loaded_docs = {}
+        if self.observations is None:
+            self.observations = []
+        if self.write_attempts is None:
+            self.write_attempts = []
+        if self.accepted_writes is None:
+            self.accepted_writes = []
+        if self.work_orders_by_id is None:
+            self.work_orders_by_id = {}
+
+
+@dataclass(frozen=True)
+class WriteReadinessResult:
+    ready: bool
+    reason: str | None = None
+    missing_fields: list[str] | None = None
+    suggested_search_terms: list[str] | None = None
+
+
+@dataclass(frozen=True)
+class DispatchGuardResult:
+    ready: bool
+    function: BaseModel | None = None
+    reason: str | None = None
+    details: dict[str, Any] | None = None
 
 
 Action = Union[
@@ -361,6 +404,26 @@ ACTION_TYPE_BY_TOOL_NAME.update({
 ACTION_CLASS_BY_TYPE = {
     cls.model_fields["type"].default: cls
     for cls in get_args(Action)
+}
+MUTATING_ACTION_TYPES = {
+    "equipment_update",
+    "employee_update",
+    "material_reorder",
+    "notif_create",
+    "notif_update",
+    "wo_create",
+    "wo_update",
+    "operation_add",
+    "operation_update",
+    "wiki_update",
+}
+READBACK_BY_WRITE_TYPE = {
+    "equipment_update": "equipment_get",
+    "employee_update": "employee_get",
+    "notif_create": "notif_get",
+    "notif_update": "notif_get",
+    "wo_create": "wo_get",
+    "wo_update": "wo_get",
 }
 
 
@@ -694,6 +757,22 @@ def _build_action_repair_message(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _build_dispatch_guard_repair_message(payload: dict[str, Any]) -> dict[str, str]:
+    return {
+        "role": "user",
+        "content": (
+            "[harness_dispatch_guard]\n"
+            "The harness did not dispatch the requested action because it would violate a "
+            "general API safety or response-contract rule. Choose the next corrective action. "
+            "If an update needs a current entity baseline, read that exact entity first. "
+            "If a write already succeeded, do not repeat it; respond using the accepted result. "
+            "If a response has invalid or missing references, repair the response with exact IDs "
+            "from API results and the benchmark ground_ref contract.\n"
+            f"Guard details: {_compact_payload(payload)}"
+        ),
+    }
+
+
 def _openrouter_action_mismatch(step: BaseModel) -> str | None:
     fn = _get_field(step, "function")
     if not isinstance(fn, Req_System):
@@ -721,6 +800,496 @@ def _openrouter_action_mismatch(step: BaseModel) -> str | None:
         )
     return None
 
+
+def _field_terms(name: str) -> list[str]:
+    terms = [name, name.replace("_", " "), name.replace("_", "-")]
+    return [term.lower() for term in terms if term]
+
+
+def _text_has_any(text: str, terms: list[str]) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in terms)
+
+
+def _action_domain_terms(action_type: str) -> list[str]:
+    parts = [part for part in action_type.split("_") if part not in {"create", "update", "add", "reorder"}]
+    terms = [action_type, action_type.replace("_", " ")]
+    terms.extend(parts)
+    if "notif" in parts:
+        terms.append("notification")
+    if "wo" in parts:
+        terms.extend(["work order", "workorder"])
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def _required_and_optional_fields(fn: BaseModel) -> tuple[list[str], list[str]]:
+    required: list[str] = []
+    optional: list[str] = []
+    for name, field in fn.__class__.model_fields.items():
+        if name == "type":
+            continue
+        if field.is_required():
+            required.append(name)
+        else:
+            optional.append(name)
+    return required, optional
+
+
+def _missing_arg_fields(fn: BaseModel, fields: list[str]) -> list[str]:
+    data = fn.model_dump(exclude_none=True, exclude={"type"})
+    return [field for field in fields if field not in data]
+
+
+def _loaded_doc_text(contract: TaskContractState) -> str:
+    if not contract.loaded_docs:
+        return ""
+    return "\n".join(
+        content
+        for path, content in contract.loaded_docs.items()
+        if path != SYSTEM_REFERENCE_PATH
+    )
+
+
+def _proposal_text(step: BaseModel, fn: BaseModel) -> str:
+    return "\n".join([
+        str(_get_field(step, "current_state") or ""),
+        " ".join(str(item) for item in (_get_field(step, "plan") or [])),
+        fn.model_dump_json(exclude_none=True),
+    ])
+
+
+def _has_policy_evidence_for_action(contract: TaskContractState, action_type: str) -> bool:
+    if not contract.loaded_docs:
+        return False
+    terms = _action_domain_terms(action_type)
+    for path, content in contract.loaded_docs.items():
+        if path == SYSTEM_REFERENCE_PATH:
+            continue
+        haystack = f"{path}\n{content}".lower()
+        if any(term.lower() in haystack for term in terms):
+            return True
+    return False
+
+
+def _has_omit_justification(text: str, fields: list[str]) -> bool:
+    lower = text.lower()
+    if not any(term in lower for term in ("omit", "irrelevant", "not needed", "not required", "optional")):
+        return False
+    return any(_text_has_any(lower, _field_terms(field)) for field in fields)
+
+
+def _loaded_docs_mention_any_field(contract: TaskContractState, fields: list[str]) -> bool:
+    doc_text = _loaded_doc_text(contract)
+    if not doc_text:
+        return False
+    return any(_text_has_any(doc_text, _field_terms(field)) for field in fields)
+
+
+def _build_write_search_terms(fn: BaseModel, missing_optional: list[str]) -> list[str]:
+    action_type = fn.type
+    terms = _action_domain_terms(action_type)
+    terms.extend(missing_optional)
+    terms.extend(field.replace("_", " ") for field in missing_optional)
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        data = value.model_dump(exclude_none=True)
+    elif isinstance(value, dict):
+        data = value
+    else:
+        data = getattr(value, "__dict__", {})
+    return data if isinstance(data, dict) else {}
+
+
+def _cache_work_order(contract: TaskContractState, work_order: Any) -> None:
+    data = _as_dict(work_order)
+    wo_id = data.get("id") or data.get("wo_id")
+    if wo_id is not None:
+        contract.work_orders_by_id[str(wo_id)] = data
+
+
+def _cache_work_orders_from_result(contract: TaskContractState, result: Any) -> None:
+    data = _as_dict(result)
+    work_order = data.get("work_order") or data.get("workorder")
+    if isinstance(work_order, dict):
+        _cache_work_order(contract, work_order)
+    work_orders = data.get("work_orders")
+    if isinstance(work_orders, list):
+        for item in work_orders:
+            if isinstance(item, dict):
+                _cache_work_order(contract, item)
+
+
+def _wo_update_mutable_fields(fn: Req_WOUpdate) -> dict[str, Any]:
+    data = fn.model_dump(exclude_none=True, exclude={"type", "wo_id"})
+    return {
+        field: value
+        for field, value in data.items()
+        if field in {"short_desc", "long_desc", "status", "execution_date", "floc"}
+    }
+
+
+def _normalize_wo_update(fn: Req_WOUpdate, contract: TaskContractState) -> DispatchGuardResult:
+    baseline = contract.work_orders_by_id.get(str(fn.wo_id))
+    if not baseline:
+        return DispatchGuardResult(
+            ready=False,
+            reason="wo_update requires a current work-order baseline before dispatch",
+            details={
+                "action_type": fn.type,
+                "wo_id": fn.wo_id,
+                "required_next_action": {"type": "wo_get", "wo_id": fn.wo_id},
+            },
+        )
+
+    changed: dict[str, Any] = {"wo_id": fn.wo_id}
+    stripped: dict[str, Any] = {}
+    for field, value in _wo_update_mutable_fields(fn).items():
+        if baseline.get(field) == value:
+            stripped[field] = value
+        else:
+            changed[field] = value
+
+    if len(changed) == 1:
+        return DispatchGuardResult(
+            ready=False,
+            reason="wo_update has no effective field changes against the current baseline",
+            details={
+                "action_type": fn.type,
+                "wo_id": fn.wo_id,
+                "stripped_unchanged_fields": sorted(stripped),
+                "baseline_excerpt": {
+                    key: baseline.get(key)
+                    for key in ("short_desc", "long_desc", "status", "execution_date", "floc")
+                    if key in baseline
+                },
+            },
+        )
+
+    normalized = Req_WOUpdate(**changed)
+    return DispatchGuardResult(
+        ready=True,
+        function=normalized,
+        details={
+            "action_type": fn.type,
+            "wo_id": fn.wo_id,
+            "stripped_unchanged_fields": sorted(stripped),
+            "dispatched_fields": sorted(k for k in changed if k != "wo_id"),
+        },
+    )
+
+
+def _write_target_key(fn: BaseModel) -> tuple[Any, ...] | None:
+    if isinstance(fn, Req_WikiUpdate):
+        return (fn.type, fn.path)
+    if isinstance(fn, Req_WOUpdate):
+        return (fn.type, fn.wo_id)
+    if isinstance(fn, Req_OperationUpdate):
+        return (fn.type, fn.workorder_id, fn.op_id)
+    if isinstance(fn, Req_NotifCreate):
+        short_desc = re.sub(r"\s+", " ", fn.short_desc.strip().lower())
+        return (fn.type, fn.floc, short_desc)
+    if isinstance(fn, Req_WOCreate):
+        return (fn.type, fn.notification_id)
+    if isinstance(fn, Req_MaterialReorder):
+        return (fn.type, fn.mat_id)
+    if isinstance(fn, Req_NotifUpdate):
+        return (fn.type, fn.notif_id)
+    if isinstance(fn, Req_UpdateEquipment):
+        return (fn.type, fn.floc)
+    if isinstance(fn, Req_UpdateEmployee):
+        return (fn.type, fn.emp_id)
+    return None
+
+
+def _effective_write_payload(fn: BaseModel) -> dict[str, Any]:
+    data = fn.model_dump(exclude_none=True, exclude={"type"})
+    for identity in ("path", "wo_id", "workorder_id", "op_id", "notif_id", "floc", "emp_id", "mat_id", "notification_id"):
+        data.pop(identity, None)
+    return data
+
+
+def _content_line_overlap(left: Any, right: Any) -> bool:
+    def lines(value: Any) -> set[str]:
+        return {
+            re.sub(r"\s+", " ", line.strip().lower())
+            for line in str(value or "").splitlines()
+            if line.strip()
+        }
+
+    return bool(lines(left) & lines(right))
+
+
+def _is_repeated_successful_write(fn: BaseModel, contract: TaskContractState) -> DispatchGuardResult:
+    target = _write_target_key(fn)
+    if target is None:
+        return DispatchGuardResult(ready=True, function=fn)
+
+    current_payload = _effective_write_payload(fn)
+    for accepted in contract.accepted_writes:
+        if accepted.get("target_key") != list(target):
+            continue
+        previous_payload = accepted.get("effective_payload")
+        duplicate_reason = None
+        if previous_payload == current_payload:
+            duplicate_reason = "same effective payload"
+        elif (
+            isinstance(fn, Req_WikiUpdate)
+            and isinstance(previous_payload, dict)
+            and _content_line_overlap(previous_payload.get("content"), current_payload.get("content"))
+        ):
+            duplicate_reason = "overlapping wiki content for the same path"
+        if duplicate_reason is not None:
+            return DispatchGuardResult(
+                ready=False,
+                reason=f"duplicate successful write to the same API target ({duplicate_reason})",
+                details={
+                    "action_type": fn.type,
+                    "target_key": target,
+                    "effective_payload": current_payload,
+                },
+            )
+    return DispatchGuardResult(ready=True, function=fn)
+
+
+def _created_or_updated_refs(contract: TaskContractState) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    for accepted in contract.accepted_writes:
+        action_type = accepted.get("type")
+        args = accepted.get("args") if isinstance(accepted.get("args"), dict) else {}
+        result = accepted.get("result") if isinstance(accepted.get("result"), dict) else {}
+        if action_type in {"wo_update", "wo_create"}:
+            wo_id = args.get("wo_id")
+            work_order = result.get("work_order") or result.get("workorder") or {}
+            wo_id = wo_id or work_order.get("id") or work_order.get("wo_id")
+            if wo_id is not None:
+                refs.append({"type": "work_order", "id": str(wo_id)})
+        elif action_type in {"notif_create", "notif_update"}:
+            notif_id = args.get("notif_id")
+            notification = result.get("notification") or {}
+            notif_id = notif_id or notification.get("id") or notification.get("notif_id")
+            if notif_id is not None:
+                refs.append({"type": "notification", "id": str(notif_id)})
+        elif action_type == "wiki_update":
+            path = args.get("path")
+            if path:
+                refs.append({"type": "wiki", "id": str(path)})
+        elif action_type == "material_reorder":
+            mat_id = args.get("mat_id")
+            if mat_id is not None:
+                refs.append({"type": "material", "id": str(mat_id)})
+        elif action_type == "equipment_update":
+            floc = args.get("floc")
+            if floc:
+                refs.append({"type": "equipment", "id": str(floc)})
+        elif action_type == "employee_update":
+            emp_id = args.get("emp_id")
+            if emp_id is not None:
+                refs.append({"type": "employee", "id": str(emp_id)})
+    return refs
+
+
+def _validate_respond(fn: Req_Respond, contract: TaskContractState) -> DispatchGuardResult:
+    refs = fn.ground_refs or []
+    allowed_types = {"work_order", "notification", "equipment", "material", "employee", "operation", "wiki"}
+    malformed: list[dict[str, str]] = []
+    for ref in refs:
+        ref_type = str(ref.type)
+        ref_id = str(ref.id)
+        if ref_type not in allowed_types:
+            malformed.append({"type": ref_type, "id": ref_id, "reason": "ground_ref type is not allowed by this harness contract"})
+        elif not ref_id.strip():
+            malformed.append({"type": ref_type, "id": ref_id, "reason": "ground_ref id is empty"})
+        elif any(fragment in ref_id for fragment in ("},{", "{", "}", "[", "]")):
+            malformed.append({"type": ref_type, "id": ref_id, "reason": "ground_ref id contains malformed JSON-like fragments"})
+    if malformed:
+        return DispatchGuardResult(
+            ready=False,
+            reason="respond contains invalid ground_refs",
+            details={"invalid_refs": malformed},
+        )
+
+    present_refs = {(str(ref.type), str(ref.id)) for ref in refs}
+    missing_refs = [
+        ref for ref in _created_or_updated_refs(contract)
+        if (ref["type"], ref["id"]) not in present_refs
+    ]
+    if missing_refs and fn.outcome == "ok_answer":
+        return DispatchGuardResult(
+            ready=False,
+            reason="respond omits ground_refs for entity/entities successfully written during this task",
+            details={"missing_refs": missing_refs},
+        )
+
+    return DispatchGuardResult(ready=True, function=fn)
+
+
+def _prepare_for_dispatch(fn: BaseModel, contract: TaskContractState) -> DispatchGuardResult:
+    prepared = fn
+    if isinstance(prepared, Req_WOUpdate):
+        wo_guard = _normalize_wo_update(prepared, contract)
+        if not wo_guard.ready:
+            return wo_guard
+        prepared = wo_guard.function
+
+    if isinstance(prepared, Req_Respond):
+        return _validate_respond(prepared, contract)
+
+    if prepared.type in MUTATING_ACTION_TYPES:
+        return _is_repeated_successful_write(prepared, contract)
+
+    return DispatchGuardResult(ready=True, function=prepared)
+
+
+def _write_readiness(step: BaseModel, fn: BaseModel, contract: TaskContractState) -> WriteReadinessResult:
+    action_type = fn.type
+    if action_type not in MUTATING_ACTION_TYPES:
+        return WriteReadinessResult(ready=True)
+
+    required_fields, optional_fields = _required_and_optional_fields(fn)
+    missing_required = _missing_arg_fields(fn, required_fields)
+    missing_optional = _missing_arg_fields(fn, optional_fields)
+    if missing_required:
+        return WriteReadinessResult(
+            ready=False,
+            reason="write is missing DTO-required fields",
+            missing_fields=missing_required,
+            suggested_search_terms=_build_write_search_terms(fn, missing_required),
+        )
+    if isinstance(fn, Req_WOUpdate):
+        return WriteReadinessResult(ready=True)
+
+    proposal_text = _proposal_text(step, fn)
+    combined_task_and_proposal = f"{contract.task_text}\n{proposal_text}"
+    doc_text = _loaded_doc_text(contract)
+    has_omit_justification = _has_omit_justification(proposal_text, missing_optional)
+
+    if missing_optional and not has_omit_justification and not _loaded_docs_mention_any_field(contract, missing_optional):
+        return WriteReadinessResult(
+            ready=False,
+            reason=(
+                "write omits optional DTO fields, and loaded policy/process evidence "
+                "does not yet explain whether those fields are relevant or safely irrelevant"
+            ),
+            missing_fields=missing_optional,
+            suggested_search_terms=_build_write_search_terms(fn, missing_optional),
+        )
+
+    relevant_missing = []
+    for field in missing_optional:
+        terms = _field_terms(field)
+        if _text_has_any(combined_task_and_proposal, terms) or _text_has_any(doc_text, terms):
+            relevant_missing.append(field)
+
+    if relevant_missing and not _has_omit_justification(proposal_text, relevant_missing):
+        return WriteReadinessResult(
+            ready=False,
+            reason=(
+                "write omits optional field(s) that appear relevant from task text, "
+                "drafted command, or loaded policy evidence"
+            ),
+            missing_fields=relevant_missing,
+            suggested_search_terms=_build_write_search_terms(fn, relevant_missing),
+        )
+
+    return WriteReadinessResult(ready=True)
+
+
+def _build_write_readiness_repair_message(
+    readiness: WriteReadinessResult,
+    fn: BaseModel,
+    step: BaseModel,
+) -> dict[str, str]:
+    payload = {
+        "action_type": fn.type,
+        "reason": readiness.reason,
+        "missing_or_challenged_fields": readiness.missing_fields or [],
+        "suggested_wiki_search_terms": readiness.suggested_search_terms or [],
+        "draft_function": fn.model_dump(exclude_none=True),
+        "draft_plan": _get_field(step, "plan") or [],
+    }
+    return {
+        "role": "user",
+        "content": (
+            "[write_readiness_repair]\n"
+            "Do not perform the drafted write yet. Build or repair the task contract first. "
+            "Use DTO field names, task wording, wiki_tree, wiki_search, wiki_load, and API observations to gather missing evidence. "
+            "Then return the next non-mutating evidence-gathering action, or return a corrected write only if all DTO-required and task/policy-relevant fields are present or explicitly justified as irrelevant.\n"
+            f"Readiness failure: {_compact_payload(payload)}"
+        ),
+    }
+
+
+def _readback_action_for_write(fn: BaseModel, result: Any) -> BaseModel | None:
+    action_type = fn.type
+    result_data = result.model_dump(exclude_none=True) if hasattr(result, "model_dump") else _get_field(result, "__dict__", {})
+
+    try:
+        if action_type == "notif_create":
+            notification = result_data.get("notification", {}) if isinstance(result_data, dict) else {}
+            notif_id = notification.get("id")
+            return Req_NotifGet(notif_id=notif_id) if notif_id is not None else None
+        if action_type == "notif_update":
+            return Req_NotifGet(notif_id=fn.notif_id)
+        if action_type == "equipment_update":
+            return Req_GetEquipment(floc=fn.floc)
+        if action_type == "employee_update":
+            return Req_GetEmployee(emp_id=fn.emp_id)
+        if action_type == "wo_update":
+            return Req_WOGet(wo_id=fn.wo_id)
+        if action_type == "wo_create":
+            work_order = result_data.get("work_order", result_data.get("workorder", {})) if isinstance(result_data, dict) else {}
+            wo_id = work_order.get("wo_id") or work_order.get("id")
+            return Req_WOGet(wo_id=wo_id) if wo_id is not None else None
+    except Exception:
+        return None
+    return None
+
+
+def _update_contract_from_bootstrap(contract: TaskContractState, label: str, text: str) -> None:
+    if label == "system":
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = {}
+        contract.current_user = data.get("current_user")
+        contract.role = data.get("role")
+        contract.today = data.get("today")
+    elif label == "wiki_tree":
+        contract.wiki_tree = text
+    elif label.startswith("benchmark_contract"):
+        contract.loaded_docs[SYSTEM_REFERENCE_PATH] = text
+
+
+def _update_contract_after_result(contract: TaskContractState, fn: BaseModel, result: Any) -> None:
+    result_text = result.model_dump_json(exclude_none=True) if hasattr(result, "model_dump_json") else str(result)
+    if isinstance(fn, Req_WikiLoad):
+        path = _get_field(result, "path") or fn.path
+        content = _get_field(result, "content") or result_text
+        contract.loaded_docs[str(path)] = str(content)
+    elif isinstance(fn, (Req_WOGet, Req_WOSearch, Req_WOUpdate, Req_WOCreate)):
+        _cache_work_orders_from_result(contract, result)
+        contract.observations.append({
+            "type": fn.type,
+            "args": fn.model_dump(exclude_none=True, exclude={"type"}),
+            "result_excerpt": _truncate(result_text),
+        })
+    elif isinstance(fn, Req_WikiSearch):
+        contract.observations.append({
+            "type": fn.type,
+            "args": fn.model_dump(exclude_none=True, exclude={"type"}),
+            "result_excerpt": _truncate(result_text),
+        })
+    elif isinstance(fn, Req_WikiTree):
+        contract.wiki_tree = _get_field(result, "tree") or result_text
+    elif not isinstance(fn, Req_Respond):
+        contract.observations.append({
+            "type": fn.type,
+            "args": fn.model_dump(exclude_none=True, exclude={"type"}),
+            "result_excerpt": _truncate(result_text),
+        })
 
 def _next_step_with_repair(
     client: OpenAI,
@@ -802,6 +1371,44 @@ def _next_step_with_repair(
         )
 
 
+def smoke_test_llm_protocol(llm_config: LLMConfig) -> None:
+    """Verify the selected model can return one valid NextStep via the real request path."""
+    client = make_llm_client(llm_config)
+    strategy = _strategy_for_config(llm_config)
+    log = [
+        {
+            "role": "system",
+            "content": (
+                "You are running a protocol smoke test for an ARC maintenance agent. "
+                "Return exactly one valid NextStep object. The next API call must be system."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Smoke test only: choose the system action to retrieve current user, role, "
+                "date, and context. Do not solve any benchmark task."
+            ),
+        },
+    ]
+    llm_result, _ = _next_step_with_repair(
+        client,
+        llm_config,
+        strategy,
+        log,
+        execution_log=None,
+        log_task_index=None,
+        step_number=0,
+    )
+    step = llm_result.step
+    if step is None or not isinstance(step.function, Req_System):
+        action_type = getattr(getattr(step, "function", None), "type", None)
+        raise RuntimeError(
+            "LLM protocol smoke test returned a valid NextStep but not the expected "
+            f"system action; got {action_type!r}."
+        )
+
+
 SYSTEM_PROMPT_BASE = """\
 You are a maintenance operations agent on NOVA-7, a gas production platform.
 You interact with the platform's maintenance management system through API calls.
@@ -870,6 +1477,7 @@ def run_agent(
     if benchmark_context is None:
         benchmark_context = {}
     bootstrap_log = _bootstrap(maint, benchmark_context)
+    task_contract = TaskContractState(task_text=task.task_text)
 
     log: list[dict] = [
         {"role": "system", "content": system_prompt},
@@ -877,6 +1485,7 @@ def run_agent(
     for label, text in bootstrap_log:
         print(f"  {CLI_GREEN}AUTO {label}{CLI_CLR}: {text[:120]}")
         log.append({"role": "user", "content": f"[{label}]\n{text}"})
+        _update_contract_from_bootstrap(task_contract, label, text)
         if execution_log is not None and log_task_index is not None:
             execution_log.add_bootstrap(log_task_index, label, text)
 
@@ -923,11 +1532,69 @@ def run_agent(
                 log.append(_build_action_repair_message(payload))
                 continue
 
-        fn_type = fn.type
         if isinstance(fn, Req_Respond):
             respond_attempts += 1
+
+        guard = _prepare_for_dispatch(fn, task_contract)
+        if not guard.ready:
+            payload = {
+                "type": "dispatch_guard_block",
+                "function_type": fn.type,
+                "reason": guard.reason,
+                "details": guard.details or {},
+                "function_args": fn.model_dump(exclude_none=True, exclude={"type"}),
+            }
+            print(f"{CLI_YELLOW}dispatch guard repair: {guard.reason}{CLI_CLR}")
+            if execution_log is not None:
+                execution_log.add_error(payload)
+                if log_task_index is not None and hasattr(execution_log, "add_task_error"):
+                    execution_log.add_task_error(log_task_index, payload)
+                if isinstance(fn, Req_Respond) and log_task_index is not None:
+                    execution_log.set_respond(
+                        log_task_index,
+                        fn,
+                        accepted=False,
+                        platform_error=payload,
+                    )
+            log.append(_build_dispatch_guard_repair_message(payload))
+            if isinstance(fn, Req_Respond) and respond_attempts >= MAX_RESPOND_ATTEMPTS:
+                print(
+                    f"    {CLI_YELLOW}respond rejected {respond_attempts} times; "
+                    f"stopping repair loop{CLI_CLR}"
+                )
+                break
+            continue
+
+        fn = guard.function or fn
+        fn_type = fn.type
         fn_args_data = fn.model_dump(exclude_none=True, exclude={"type"})
         fn_args = fn.model_dump_json(exclude_none=True, exclude={"type"})
+
+        readiness = _write_readiness(step, fn, task_contract)
+        if not readiness.ready:
+            task_contract.write_attempts.append({
+                "type": fn_type,
+                "args": fn_args_data,
+                "ready": False,
+                "reason": readiness.reason,
+                "missing_fields": readiness.missing_fields or [],
+            })
+            payload = {
+                "type": "write_readiness_block",
+                "function_type": fn_type,
+                "reason": readiness.reason,
+                "missing_fields": readiness.missing_fields or [],
+                "suggested_search_terms": readiness.suggested_search_terms or [],
+                "function_args": fn_args_data,
+            }
+            print(f"{CLI_YELLOW}write readiness repair: {readiness.reason}{CLI_CLR}")
+            if execution_log is not None:
+                execution_log.add_error(payload)
+                if log_task_index is not None and hasattr(execution_log, "add_task_error"):
+                    execution_log.add_task_error(log_task_index, payload)
+            log.append(_build_write_readiness_repair_message(readiness, fn, step))
+            continue
+
         print(f"{CLI_CYAN}{fn_type}{CLI_CLR} - {step.plan[0]}  ({elapsed_ms}ms)")
         print(f"    {CLI_YELLOW}args:{CLI_CLR} {fn_args[:300]}")
         log_step_index = None
@@ -978,11 +1645,41 @@ def run_agent(
             result_text = result.model_dump_json(exclude_none=True)
             print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
             respond_accepted = isinstance(fn, Req_Respond)
+            platform_log_result: Any = result
+            if fn_type in MUTATING_ACTION_TYPES:
+                target_key = _write_target_key(fn)
+                task_contract.accepted_writes.append({
+                    "type": fn_type,
+                    "args": fn_args_data,
+                    "target_key": list(target_key) if target_key is not None else None,
+                    "effective_payload": _effective_write_payload(fn),
+                    "result": result.model_dump(exclude_none=True) if hasattr(result, "model_dump") else str(result),
+                })
+                readback_fn = _readback_action_for_write(fn, result)
+                if readback_fn is not None:
+                    try:
+                        readback = maint.dispatch(readback_fn)
+                        readback_text = readback.model_dump_json(exclude_none=True)
+                        print(f"    {CLI_GREEN}readback->{CLI_CLR} {readback_text[:200]}")
+                        platform_log_result = {
+                            "write_result": result.model_dump(exclude_none=True),
+                            "readback": readback.model_dump(exclude_none=True),
+                        }
+                        result_text = json.dumps(platform_log_result, ensure_ascii=False, default=str)
+                        _update_contract_after_result(task_contract, readback_fn, readback)
+                    except Exception as exc:
+                        platform_log_result = {
+                            "write_result": result.model_dump(exclude_none=True),
+                            "readback_error": str(exc),
+                        }
+                        result_text = json.dumps(platform_log_result, ensure_ascii=False, default=str)
+                        print(f"    {CLI_YELLOW}readback warning: {exc}{CLI_CLR}")
+            _update_contract_after_result(task_contract, fn, result)
             if execution_log is not None and log_task_index is not None and log_step_index is not None:
                 execution_log.finish_step(
                     log_task_index,
                     log_step_index,
-                    platform_result=result,
+                    platform_result=platform_log_result,
                     platform_duration_ms=platform_elapsed_ms,
                 )
             if isinstance(fn, Req_Respond) and execution_log is not None and log_task_index is not None:

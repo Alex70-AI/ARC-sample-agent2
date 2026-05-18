@@ -1,0 +1,373 @@
+﻿{
+    "schema_version":  1,
+    "type":  "batch_summary",
+    "detail_log":  "b_15052026_1945_003.json",
+    "started_at":  "2026-05-15T19:45:43+08:00",
+    "completed_at":  "2026-05-15T19:55:19+08:00",
+    "workspace":  "dev",
+    "llm":  {
+                "provider":  "openai",
+                "model":  "gpt-4.1"
+            },
+    "cost_config":  {
+                        "path":  "cost.json",
+                        "loaded":  true,
+                        "updated_at":  "2026-05-15"
+                    },
+    "summary":  {
+                    "task_count":  13,
+                    "completed_count":  13,
+                    "total_respond_attempts":  13,
+                    "total_respond_rejections":  0,
+                    "total_steps":  69,
+                    "total_input_tokens":  585551,
+                    "total_cached_input_tokens":  438656,
+                    "total_billable_input_tokens":  146895,
+                    "total_output_tokens":  13125,
+                    "total_reasoning_tokens":  0,
+                    "total_tokens":  598676,
+                    "estimated_cost_usd":  0.618118,
+                    "scores":  [
+                                   {
+                                       "spec_id":  "document_review_1",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "document_review_2",
+                                       "score":  0.0
+                                   },
+                                   {
+                                       "spec_id":  "notification_raise",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "notification_search",
+                                       "score":  0.0
+                                   },
+                                   {
+                                       "spec_id":  "not_supported",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "not_their_business",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "obsolete_material",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "operation_update",
+                                       "score":  0.0
+                                   },
+                                   {
+                                       "spec_id":  "opportunity_for_repair",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "planner_assist",
+                                       "score":  0.0
+                                   },
+                                   {
+                                       "spec_id":  "which_one_boss",
+                                       "score":  0.0
+                                   },
+                                   {
+                                       "spec_id":  "workorder_completion",
+                                       "score":  1.0
+                                   },
+                                   {
+                                       "spec_id":  "work_scheduling",
+                                       "score":  1.0
+                                   }
+                               ]
+                },
+    "tasks":  [
+                  {
+                      "spec_id":  "document_review_1",
+                      "task_id":  "tsk-31c9f560062d",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:45:45+08:00",
+                      "completed_at":  "2026-05-15T19:46:21+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  3,
+                                     "input_tokens":  23549,
+                                     "cached_input_tokens":  13312,
+                                     "billable_input_tokens":  10237,
+                                     "output_tokens":  589,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  24138,
+                                     "estimated_cost_usd":  0.031842
+                                 }
+                  },
+                  {
+                      "spec_id":  "document_review_2",
+                      "task_id":  "tsk-e32e57c3f74a",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:46:21+08:00",
+                      "completed_at":  "2026-05-15T19:48:17+08:00",
+                      "score":  0.0,
+                      "eval_logs":  "\u001b[31mâœ—  expected exactly 1 wiki update for sop/block-valve-replacement.md got 7\u001b[0m",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  12,
+                                     "input_tokens":  107822,
+                                     "cached_input_tokens":  91392,
+                                     "billable_input_tokens":  16430,
+                                     "output_tokens":  2246,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  110068,
+                                     "estimated_cost_usd":  0.096524
+                                 }
+                  },
+                  {
+                      "spec_id":  "notification_raise",
+                      "task_id":  "tsk-c830bf336613",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:48:17+08:00",
+                      "completed_at":  "2026-05-15T19:49:33+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  8,
+                                     "input_tokens":  79966,
+                                     "cached_input_tokens":  65408,
+                                     "billable_input_tokens":  14558,
+                                     "output_tokens":  1626,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  81592,
+                                     "estimated_cost_usd":  0.074828
+                                 }
+                  },
+                  {
+                      "spec_id":  "notification_search",
+                      "task_id":  "tsk-d9cf580c3b0e",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:49:33+08:00",
+                      "completed_at":  "2026-05-15T19:50:03+08:00",
+                      "score":  0.0,
+                      "eval_logs":  "\u001b[31mâœ—  expected outcome ok_answer got ok_not_found\u001b[0m",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  4,
+                                     "input_tokens":  34266,
+                                     "cached_input_tokens":  22528,
+                                     "billable_input_tokens":  11738,
+                                     "output_tokens":  658,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  34924,
+                                     "estimated_cost_usd":  0.040004
+                                 }
+                  },
+                  {
+                      "spec_id":  "not_supported",
+                      "task_id":  "tsk-ec4aaa373f7f",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:50:03+08:00",
+                      "completed_at":  "2026-05-15T19:50:27+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  4,
+                                     "input_tokens":  32149,
+                                     "cached_input_tokens":  20480,
+                                     "billable_input_tokens":  11669,
+                                     "output_tokens":  722,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  32871,
+                                     "estimated_cost_usd":  0.039354
+                                 }
+                  },
+                  {
+                      "spec_id":  "not_their_business",
+                      "task_id":  "tsk-f473a9e79ad6",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:50:27+08:00",
+                      "completed_at":  "2026-05-15T19:50:45+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  3,
+                                     "input_tokens":  24293,
+                                     "cached_input_tokens":  14336,
+                                     "billable_input_tokens":  9957,
+                                     "output_tokens":  528,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  24821,
+                                     "estimated_cost_usd":  0.031306
+                                 }
+                  },
+                  {
+                      "spec_id":  "obsolete_material",
+                      "task_id":  "tsk-5bfc61438d08",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:50:45+08:00",
+                      "completed_at":  "2026-05-15T19:50:58+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  2,
+                                     "input_tokens":  14414,
+                                     "cached_input_tokens":  6144,
+                                     "billable_input_tokens":  8270,
+                                     "output_tokens":  355,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  14769,
+                                     "estimated_cost_usd":  0.022452
+                                 }
+                  },
+                  {
+                      "spec_id":  "operation_update",
+                      "task_id":  "tsk-ae729eb09123",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:50:58+08:00",
+                      "completed_at":  "2026-05-15T19:52:09+08:00",
+                      "score":  0.0,
+                      "eval_logs":  "\u001b[31mâœ—  expected outcome none_clarification_needed got ok_answer\u001b[0m",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  8,
+                                     "input_tokens":  71779,
+                                     "cached_input_tokens":  58368,
+                                     "billable_input_tokens":  13411,
+                                     "output_tokens":  1494,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  73273,
+                                     "estimated_cost_usd":  0.067958
+                                 }
+                  },
+                  {
+                      "spec_id":  "opportunity_for_repair",
+                      "task_id":  "tsk-c88940f06784",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:52:09+08:00",
+                      "completed_at":  "2026-05-15T19:52:58+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  7,
+                                     "input_tokens":  52471,
+                                     "cached_input_tokens":  46720,
+                                     "billable_input_tokens":  5751,
+                                     "output_tokens":  1262,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  53733,
+                                     "estimated_cost_usd":  0.044958
+                                 }
+                  },
+                  {
+                      "spec_id":  "planner_assist",
+                      "task_id":  "tsk-eaa6b8f5b8ec",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:52:58+08:00",
+                      "completed_at":  "2026-05-15T19:53:44+08:00",
+                      "score":  0.0,
+                      "eval_logs":  "\u001b[31mâœ—  expected remaining capacity 11.9\u001b[0m",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  6,
+                                     "input_tokens":  50465,
+                                     "cached_input_tokens":  37888,
+                                     "billable_input_tokens":  12577,
+                                     "output_tokens":  1569,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  52034,
+                                     "estimated_cost_usd":  0.05665
+                                 }
+                  },
+                  {
+                      "spec_id":  "which_one_boss",
+                      "task_id":  "tsk-f57170600b7d",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:53:44+08:00",
+                      "completed_at":  "2026-05-15T19:54:14+08:00",
+                      "score":  0.0,
+                      "eval_logs":  "\u001b[31mâœ—  expected outcome none_clarification_needed got ok_answer\u001b[0m",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  4,
+                                     "input_tokens":  29436,
+                                     "cached_input_tokens":  23552,
+                                     "billable_input_tokens":  5884,
+                                     "output_tokens":  657,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  30093,
+                                     "estimated_cost_usd":  0.0288
+                                 }
+                  },
+                  {
+                      "spec_id":  "workorder_completion",
+                      "task_id":  "tsk-c6651251ba9d",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:54:14+08:00",
+                      "completed_at":  "2026-05-15T19:54:46+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  4,
+                                     "input_tokens":  33310,
+                                     "cached_input_tokens":  23296,
+                                     "billable_input_tokens":  10014,
+                                     "output_tokens":  674,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  33984,
+                                     "estimated_cost_usd":  0.037068
+                                 }
+                  },
+                  {
+                      "spec_id":  "work_scheduling",
+                      "task_id":  "tsk-c6b2268f4a7d",
+                      "status":  "new",
+                      "started_at":  "2026-05-15T19:54:46+08:00",
+                      "completed_at":  "2026-05-15T19:55:18+08:00",
+                      "score":  1.0,
+                      "eval_logs":  "",
+                      "respond_attempt_count":  1,
+                      "respond_rejected_count":  0,
+                      "respond_accepted":  true,
+                      "tokens":  {
+                                     "steps":  4,
+                                     "input_tokens":  31631,
+                                     "cached_input_tokens":  15232,
+                                     "billable_input_tokens":  16399,
+                                     "output_tokens":  745,
+                                     "reasoning_tokens":  0,
+                                     "total_tokens":  32376,
+                                     "estimated_cost_usd":  0.046374
+                                 }
+                  }
+              ]
+}
