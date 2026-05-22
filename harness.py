@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 
@@ -21,7 +22,7 @@ class RunLogger:
         mode: str,
         root: str | Path = "logs",
         cost_path: str | Path = "cost.json",
-        version_path: str | Path = "harness_versions",
+        version_path: str | Path = "harness_versions.md",
     ) -> None:
         if mode not in {"batch", "task"}:
             raise ValueError(f"Unsupported log mode: {mode!r}")
@@ -314,13 +315,18 @@ def _load_cost_table(path: Path) -> dict[str, Any]:
         return {}
 
 
-def load_harness_version(path: str | Path = "harness_versions") -> str:
+def load_harness_version(path: str | Path = "harness_versions.md") -> str:
     path = Path(path)
     try:
-        version = path.read_text(encoding="utf-8").strip()
+        text = path.read_text(encoding="utf-8")
     except OSError:
-        version = ""
-    return version or "unknown"
+        return "unknown"
+
+    for line in text.splitlines():
+        match = re.match(r"^#+\s+(\d+\.\d+(?:\.\d+)?)\b", line.strip())
+        if match:
+            return match.group(1)
+    return "unknown"
 
 
 def _empty_usage() -> dict[str, Any]:
