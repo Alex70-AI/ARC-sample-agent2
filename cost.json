@@ -1,0 +1,142 @@
+{
+  "schema_version": 2,
+  "updated_at": "2026-05-18",
+  "currency": "USD",
+  "unit": "1M tokens",
+  "sources": {
+    "openai": "https://developers.openai.com/api/docs/pricing",
+    "openrouter": "https://openrouter.ai/api/v1/models"
+  },
+  "notes": [
+    "Standard API prices in USD per 1M tokens.",
+    "Large-context duplicate pricing rows are intentionally omitted.",
+    "Provider model ids map to shared price ids to avoid duplicating identical prices."
+  ],
+  "prices": {
+    "openai/gpt-5.5": {
+      "input_per_1m": 5.0,
+      "cached_input_per_1m": 0.5,
+      "output_per_1m": 30.0
+    },
+    "openai/gpt-5.5-pro": {
+      "input_per_1m": 30.0,
+      "output_per_1m": 180.0
+    },
+    "openai/gpt-5.4": {
+      "input_per_1m": 2.5,
+      "cached_input_per_1m": 0.25,
+      "output_per_1m": 15.0
+    },
+    "openai/gpt-5.4-mini": {
+      "input_per_1m": 0.75,
+      "cached_input_per_1m": 0.075,
+      "output_per_1m": 4.5
+    },
+    "openai/gpt-5.4-nano": {
+      "input_per_1m": 0.2,
+      "cached_input_per_1m": 0.02,
+      "output_per_1m": 1.25
+    },
+    "openai/gpt-5.4-pro": {
+      "input_per_1m": 30.0,
+      "output_per_1m": 180.0
+    },
+    "openai/gpt-5.3": {
+      "input_per_1m": 1.75,
+      "cached_input_per_1m": 0.175,
+      "output_per_1m": 14.0
+    },
+    "openai/gpt-4.1": {
+      "input_per_1m": 2.0,
+      "cached_input_per_1m": 0.5,
+      "output_per_1m": 8.0
+    },
+    "openai/gpt-4.1-mini": {
+      "input_per_1m": 0.4,
+      "cached_input_per_1m": 0.1,
+      "output_per_1m": 1.6
+    },
+    "openai/gpt-4.1-nano": {
+      "input_per_1m": 0.1,
+      "cached_input_per_1m": 0.025,
+      "output_per_1m": 0.4
+    },
+    "openai/gpt-4": {
+      "input_per_1m": 30.0,
+      "output_per_1m": 60.0
+    },
+    "openai/gpt-oss-120b": {
+      "input_per_1m": 0.039,
+      "output_per_1m": 0.18
+    },
+    "deepseek/deepseek-v3.2": {
+      "input_per_1m": 0.252,
+      "cached_input_per_1m": 0.0252,
+      "output_per_1m": 0.378
+    },
+    "deepseek/deepseek-v4-pro": {
+      "input_per_1m": 1.68,
+      "cached_input_per_1m": 0.116,
+      "output_per_1m": 3.38
+    },
+    "moonshotai/kimi-k2.6": {
+      "input_per_1m": 0.73,
+      "cached_input_per_1m": 0.25,
+      "output_per_1m": 3.49
+    },
+    "qwen/qwen3.6-plus": {
+      "input_per_1m": 0.325,
+      "cached_input_per_1m": 0.0325,
+      "output_per_1m": 1.95
+    },
+    "google/gemini-3-flash-preview": {
+      "input_per_1m": 0.5,
+      "cached_input_per_1m": 0.05,
+      "cache_write_per_1m": 0.08333,
+      "output_per_1m": 3.0
+    },
+    "x-ai/grok-4.20": {
+      "input_per_1m": 1.25,
+      "cached_input_per_1m": 0.2,
+      "output_per_1m": 2.5
+    }
+  },
+  "providers": {
+    "openai": {
+      "models": {
+        "gpt-5.5": "openai/gpt-5.5",
+        "gpt-5.4": "openai/gpt-5.4",
+        "gpt-5.4-mini": "openai/gpt-5.4-mini",
+        "gpt-5.4-nano": "openai/gpt-5.4-nano",
+        "gpt-5.3-codex": "openai/gpt-5.3",
+        "gpt-5.3-chat-latest": "openai/gpt-5.3",
+        "gpt-4.1": "openai/gpt-4.1",
+        "gpt-4.1-mini": "openai/gpt-4.1-mini",
+        "gpt-4.1-nano": "openai/gpt-4.1-nano",
+        "gpt-4": "openai/gpt-4"
+      }
+    },
+    "openrouter": {
+      "models": {
+        "openai/gpt-5.5": "openai/gpt-5.5",
+        "openai/gpt-5.4": "openai/gpt-5.4",
+        "openai/gpt-5.4-mini": "openai/gpt-5.4-mini",
+        "openai/gpt-5.4-nano": "openai/gpt-5.4-nano",
+        "openai/gpt-5.3-codex": "openai/gpt-5.3",
+        "openai/gpt-5.3-chat": "openai/gpt-5.3",
+        "openai/gpt-4.1": "openai/gpt-4.1",
+        "openai/gpt-4.1-mini": "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano": "openai/gpt-4.1-nano",
+        "openai/gpt-4": "openai/gpt-4",
+        "openai/gpt-oss-120b": "openai/gpt-oss-120b",
+        "deepseek/deepseek-v3.2": "deepseek/deepseek-v3.2",
+        "deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+        "moonshotai/kimi-k2.6": "moonshotai/kimi-k2.6",
+        "qwen/qwen3.6-plus": "qwen/qwen3.6-plus",
+        "google/gemini-3-flash-preview": "google/gemini-3-flash-preview",
+        "x-ai/grok-4.20": "x-ai/grok-4.20",
+        "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-super-120b-a12b:free"
+      }
+    }
+  }
+}

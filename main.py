@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
+from typing import Callable, TypeVar
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -28,8 +30,8 @@ load_dotenv()
 
 from ogchallenge_client import CoreClient, ApiException
 
-from agent import LLMConfig, make_llm_client, run_agent, smoke_test_llm_protocol
-from execution_log import ExecutionLog
+from agent import LLMConfig, make_llm_client, run_agent
+from harness import RunLogger, load_harness_version
 
 DEFAULT_ARC_BASE_URL = "https://agentreliabilitychallenge.com"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -37,8 +39,13 @@ DEFAULT_MODEL_ID = "gpt-4.1-2025-04-14"
 
 CLI_RED = "\x1b[31m"
 CLI_GREEN = "\x1b[32m"
+CLI_YELLOW = "\x1b[33m"
 CLI_BLUE = "\x1b[34m"
 CLI_CLR = "\x1b[0m"
+
+T = TypeVar("T")
+TRANSIENT_API_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+TRANSIENT_API_ERROR_CODES = {"network_error", "timeout", "rate_limit"}
 
 
 class ConfigurationError(RuntimeError):
@@ -116,7 +123,7 @@ def _build_llm_config() -> LLMConfig:
 def _preflight_platform(api: CoreClient) -> None:
     print(f"Checking platform connectivity at {api.base_url} ...")
     try:
-        benchmarks = api.list_benchmarks()
+        benchmarks = _api_retry("list_benchmarks", api.list_benchmarks)
     except ApiException as exc:
         if exc.status_code in {401, 403}:
             raise ConfigurationError(
@@ -157,83 +164,120 @@ def _preflight_llm(llm_config: LLMConfig) -> None:
         raise ConfigurationError(
             f"MODEL_ID {llm_config.model!r} was not found for provider {llm_config.provider!r}.{hint}"
         )
-    print(f"{CLI_GREEN}LLM model OK{CLI_CLR}")
-
-    print("Checking LLM structured-output protocol ...")
-    try:
-        smoke_test_llm_protocol(llm_config)
-    except Exception as exc:
-        raise ConfigurationError(
-            "LLM protocol smoke test failed. The selected provider/model could not produce "
-            "one valid ARC NextStep through the harness request shape. "
-            f"Original error: {exc}"
-        ) from exc
-    print(f"{CLI_GREEN}LLM protocol OK{CLI_CLR}")
+    print(f"{CLI_GREEN}LLM OK{CLI_CLR}")
 
 
-def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
-    """Start a full session and run all tasks."""
-    execution_log = ExecutionLog(
-        mode="batch",
-        workspace=workspace,
-        llm_provider=llm_config.provider,
-        llm_model=llm_config.model,
+def _is_transient_api_error(exc: ApiException) -> bool:
+    code = getattr(exc.api_error, "code", "")
+    return (
+        exc.status_code == 0
+        or exc.status_code in TRANSIENT_API_STATUS_CODES
+        or code in TRANSIENT_API_ERROR_CODES
     )
-    print(f"Execution log: {execution_log.path}")
+
+
+def _api_retry(description: str, call: Callable[[], T]) -> T:
+    """Retry transient ARC platform failures such as TLS resets and 5xxs."""
+    attempts = max(1, int(os.getenv("ARC_API_RETRIES", "4")))
+    delay_sec = max(0.1, float(os.getenv("ARC_API_RETRY_DELAY_SEC", "2")))
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return call()
+        except ApiException as exc:
+            if not _is_transient_api_error(exc) or attempt == attempts:
+                raise
+            print(
+                f"{CLI_YELLOW}Transient platform error during {description}: "
+                f"{exc}. Retrying in {delay_sec:.1f}s "
+                f"({attempt}/{attempts})...{CLI_CLR}"
+            )
+            time.sleep(delay_sec)
+            delay_sec = min(delay_sec * 2, 30)
+
+    raise RuntimeError("unreachable")
+
+
+def run_session(
+    api: CoreClient,
+    workspace: str,
+    llm_config: LLMConfig,
+    *,
+    run_logger: RunLogger | None = None,
+) -> None:
+    """Start a full session and run all tasks."""
     print(
         "Starting session "
         f"(benchmark=maintenance-ops, workspace={workspace!r}, model={llm_config.model!r})..."
     )
-    session = api.start_session(
-        benchmark="maintenance-ops",
-        workspace=workspace,
-        name=f"sample-agent ({llm_config.model})",
-        architecture=f"{llm_config.provider} structured-output agent",
+    session = _api_retry(
+        "start_session",
+        lambda: api.start_session(
+            benchmark="maintenance-ops",
+            workspace=workspace,
+            name=f"sample-agent ({llm_config.model})",
+            architecture=f"{llm_config.provider} structured-output agent",
+        ),
     )
-    execution_log.set_session(session)
     print(f"Session ID: {session.session_id}  tasks: {session.task_count}\n")
+    if run_logger:
+        run_logger.set_session(
+            session_id=session.session_id,
+            task_count=session.task_count,
+            benchmark="maintenance-ops",
+            workspace=workspace,
+        )
 
-    status = api.session_status(session.session_id)
+    status = _api_retry(
+        "session_status",
+        lambda: api.session_status(session.session_id),
+    )
     scores = []
-    benchmark_context: dict[str, str] = {}
 
     for task_info in status.tasks:
         print("=" * 60)
-        log_task_index = execution_log.start_task(task_info)
-        api.start_task(task_info)
+        _api_retry("start_task", lambda: api.start_task(task_info))
+        if run_logger:
+            run_logger.start_task(task_info)
 
         try:
-            run_agent(
-                api,
-                task_info,
-                llm_config=llm_config,
-                execution_log=execution_log,
-                log_task_index=log_task_index,
-                benchmark_context=benchmark_context,
-            )
+            run_agent(api, task_info, llm_config=llm_config, run_logger=run_logger)
         except Exception as exc:
             print(f"  {CLI_RED}ERROR: {exc}{CLI_CLR}")
-            execution_log.finish_task(log_task_index, error=exc)
+            if run_logger:
+                run_logger.record_task_error(exc)
 
-        result = api.complete_task(task_info)
-        execution_log.finish_task(log_task_index, completion=result)
+        result = _api_retry("complete_task", lambda: api.complete_task(task_info))
+        task_result = {
+            "complete_status": result.status,
+            "score": None,
+            "eval_logs": None,
+        }
         if result.eval:
             score = result.eval.score
             scores.append((task_info.spec_id, score))
+            task_result["score"] = score
+            task_result["eval_logs"] = result.eval.logs
             style = CLI_GREEN if score >= 0.8 else CLI_RED
             print(f"\n  {style}SCORE: {score:.2f}{CLI_CLR}")
             if score < 1.0 and result.eval.logs:
                 explain = "\n".join(f"    {line}" for line in result.eval.logs.splitlines())
                 print(f"{CLI_RED}{explain}{CLI_CLR}")
+        if run_logger:
+            run_logger.finish_task(**task_result)
 
     print("\n" + "=" * 60)
-    submitted = api.submit_session(session.session_id)
+    submitted = _api_retry(
+        "submit_session",
+        lambda: api.submit_session(session.session_id),
+    )
     print(f"Session submitted - status: {submitted.status}  score: {submitted.score:.2f}")
-    execution_log.data["submission"] = {
-        "status": submitted.status,
-        "score": submitted.score,
-    }
-    execution_log.finish_run()
+    if run_logger:
+        run_logger.finish(
+            submitted_status=submitted.status,
+            submitted_score=submitted.score,
+            task_scores=[{"spec_id": spec_id, "score": score} for spec_id, score in scores],
+        )
 
     if scores:
         print()
@@ -244,39 +288,41 @@ def run_session(api: CoreClient, workspace: str, llm_config: LLMConfig) -> None:
         print(f"\n  FINAL: {total:.1f}%")
 
 
-def run_single_task(api: CoreClient, spec_id: str, llm_config: LLMConfig) -> None:
+def run_single_task(
+    api: CoreClient,
+    spec_id: str,
+    llm_config: LLMConfig,
+    *,
+    run_logger: RunLogger | None = None,
+) -> None:
     """Start a standalone task by spec_id (for development/testing)."""
-    execution_log = ExecutionLog(
-        mode="single",
-        llm_provider=llm_config.provider,
-        llm_model=llm_config.model,
-    )
-    print(f"Execution log: {execution_log.path}")
     print(
         f"Starting standalone task: spec={spec_id!r}, provider={llm_config.provider!r}, model={llm_config.model!r}\n"
     )
-    task_info = api.start_new_task(benchmark="maintenance-ops", spec_id=spec_id)
-    log_task_index = execution_log.start_task(task_info)
+    task_info = _api_retry(
+        "start_new_task",
+        lambda: api.start_new_task(benchmark="maintenance-ops", spec_id=spec_id),
+    )
+    if run_logger:
+        run_logger.start_task(task_info)
 
     try:
-        benchmark_context: dict[str, str] = {}
-        run_agent(
-            api,
-            task_info,
-            llm_config=llm_config,
-            execution_log=execution_log,
-            log_task_index=log_task_index,
-            benchmark_context=benchmark_context,
-        )
+        run_agent(api, task_info, llm_config=llm_config, run_logger=run_logger)
     except Exception as exc:
         print(f"{CLI_RED}ERROR: {exc}{CLI_CLR}")
-        execution_log.finish_task(log_task_index, error=exc)
+        if run_logger:
+            run_logger.record_task_error(exc)
 
-    result = api.complete_task(task_info)
-    execution_log.finish_task(log_task_index, completion=result)
-    execution_log.finish_run()
+    result = _api_retry("complete_task", lambda: api.complete_task(task_info))
+    task_result = {
+        "complete_status": result.status,
+        "score": None,
+        "eval_logs": None,
+    }
     if result.eval:
         score = result.eval.score
+        task_result["score"] = score
+        task_result["eval_logs"] = result.eval.logs
         style = CLI_GREEN if score >= 0.8 else CLI_RED
         print(f"\n{style}SCORE: {score:.2f}{CLI_CLR}")
         if score < 1.0 and result.eval.logs:
@@ -284,30 +330,65 @@ def run_single_task(api: CoreClient, spec_id: str, llm_config: LLMConfig) -> Non
             print(f"{CLI_RED}{explain}{CLI_CLR}")
     else:
         print(f"\nStatus: {result.status}")
+    if run_logger:
+        run_logger.finish_task(**task_result)
+        run_logger.finish(spec_id=spec_id, **task_result)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ARC sample agent")
     parser.add_argument("--spec", help="Run a single task by spec_id (skips session)")
     parser.add_argument("--workspace", default="dev", help="Session workspace tag (default: dev)")
+    parser.add_argument("--no-log", action="store_true", help="Disable local JSON run logging")
+    parser.add_argument("--log-root", default="logs", help="Local JSON log root (default: logs)")
     args = parser.parse_args()
+
+    print(f"Harness version: {load_harness_version()}")
+
+    run_logger = None
+    if not args.no_log:
+        run_logger = RunLogger(
+            mode="task" if args.spec else "batch",
+            root=args.log_root,
+        )
+        print(f"Local run log: {run_logger.path}")
 
     try:
         api = _build_platform_client()
         llm_config = _build_llm_config()
+        if run_logger:
+            run_logger.set_metadata(
+                provider=llm_config.provider,
+                model=llm_config.model,
+                workspace=args.workspace,
+                spec=args.spec,
+            )
         _preflight_platform(api)
         _preflight_llm(llm_config)
     except ConfigurationError as exc:
         print(f"{CLI_RED}Configuration error:{CLI_CLR} {exc}")
+        if run_logger:
+            run_logger.record_error(exc)
+            run_logger.finish(status="error")
         raise SystemExit(2) from exc
     except Exception as exc:
         print(f"{CLI_RED}Startup failed:{CLI_CLR} {exc}")
+        if run_logger:
+            run_logger.record_error(exc)
+            run_logger.finish(status="error")
         raise SystemExit(2) from exc
 
-    if args.spec:
-        run_single_task(api, args.spec, llm_config)
-    else:
-        run_session(api, workspace=args.workspace, llm_config=llm_config)
+    try:
+        if args.spec:
+            run_single_task(api, args.spec, llm_config, run_logger=run_logger)
+        else:
+            run_session(api, workspace=args.workspace, llm_config=llm_config, run_logger=run_logger)
+    except Exception as exc:
+        print(f"{CLI_RED}Run failed:{CLI_CLR} {exc}")
+        if run_logger:
+            run_logger.record_error(exc)
+            run_logger.finish(status="error")
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

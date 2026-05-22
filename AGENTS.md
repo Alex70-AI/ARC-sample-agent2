@@ -1,79 +1,36 @@
-# AGENTS.md
+# Agent Guidance
 
-## Repository Role
+This repo is for improving the ARC maintenance-ops sample agent and its local
+run harness. Keep changes benchmark-general, compact, and easy to inspect.
 
-This file is for humans and coding agents working on this repository. Runtime
-benchmark behavior for the ARC maintenance agent lives in `ARC_AGENT.md` and is
-loaded by `agent.py`.
+## Core Rules
 
-## Development Rules
+1. Do not propose or implement task-specific ARC agent heuristics.
+   Improvements must generalize across current and future benchmark tasks. Avoid
+   hardcoded spec IDs, task text matching, entity-name shortcuts, or benchmark
+   answer patterns that would make the agent brittle as new tasks are added.
 
-- Keep benchmark/runtime prompt guidance out of this file unless it is also
-  needed by repository maintainers.
-- Put ARC task-solving guidance in `ARC_AGENT.md`.
-- After prompt or agent-loop changes, run at least:
+2. Keep log and harness changes small.
+   Changes to logging, run metadata, and harness behavior should avoid large
+   additions, broad abstractions, and long instruction layers. Autonomous-agent
+   systems often work best when the core control logic stays small enough to
+   audit. If a proposed harness change is growing substantially, pause and
+   simplify the design.
 
-```bash
-python -m py_compile agent.py main.py
-```
+## Additional Principles
 
-- Do not commit secrets from `.env` or logs containing credentials.
-- Preserve execution logs unless the user explicitly asks to delete them.
+3. Prefer source-of-truth data over inferred shortcuts.
+   Agent behavior should be driven by task text, API results, wiki/policy
+   content, and explicit runtime metadata. When changing prompts or control
+   flow, favor better evidence gathering and validation over hidden assumptions.
 
-## Harness Versioning
+4. Preserve run comparability.
+   Harness and logging changes should keep old and new runs easy to compare.
+   Add compact metadata when needed, but avoid changing score interpretation,
+   mutating historical logs, or producing noisy output that obscures task
+   outcomes.
 
-Runtime behavior versions are tracked for changes to `agent.py` and
-`ARC_AGENT.md`.
-
-Before editing either file, propose whether the change is:
-
-- no version bump
-- minor version bump
-- major version bump
-
-Explain the reason and proposed new version. Do not change version identifiers
-until the user confirms.
-
-When a version identifier changes, add an entry to
-`logs/harness_versions.md` with the version number, change type, concise summary, reason for the bump, and expected benchmark impact.
-
-Use no version bump for comments, formatting, tests-only changes, non-runtime documentation, and model/cost/pricing changes.
-
-Use a minor version bump for bounded runtime fixes within the existing harness
-architecture, such as retry classification additions, small prompt
-clarifications, preflight improvements, extra logging, or targeted validation
-for an already-known failure mode.
-
-Use a major version bump for changes that alter action selection, dispatch
-eligibility, stopping conditions, repair policy, evidence requirements, write
-gating, provider strategy, or prompt architecture across the benchmark.
-
-## Post-Batch Feedback Loop
-
-After a batch run, analyze recent execution logs before changing runtime
-guidance:
-
-- Discover logs by reading `logs/*.json`, excluding `*_summary.json`, and
-  parsing JSON content. Do not assume a specific filename pattern.
-- Read logs with UTF-8 BOM tolerance, for example `encoding="utf-8-sig"`.
-- Identify batch logs by JSON field `mode == "batch"` and sort by JSON
-  `started_at`, not by filename or filesystem modified time.
-- Prefer the last 4-5 batch logs when available; if fewer exist, analyze all
-  available batch logs.
-- Include single-task logs only when they are deliberate reruns of a specific
-  failed scenario.
-- Compare failures and successes by task/spec, including search/action
-  sequences, first wrong assumptions, zero-result searches, API errors,
-  outcome/ref correctness, and repeated or missing writes.
-- Summarize failed tasks, improved/regressed tasks, successful search/action
-  patterns, repeated failed patterns, and confidence level for each reusable
-  lesson.
-
-Material changes to `ARC_AGENT.md` require human approval:
-
-- First show the proposed guidance change or concise patch summary.
-- Explain which log evidence supports each change.
-- Do not implement material runtime guidance changes until the user approves.
-
-Never promote exact entity IDs, spec-specific recipes, one-off lucky searches,
-or task answers into `ARC_AGENT.md`.
+5. Verify with the narrowest useful check.
+   For code changes, run the smallest relevant syntax, unit, or smoke check that
+   demonstrates the behavior. Do not add broad test machinery unless the change
+   affects shared behavior or repeatability.

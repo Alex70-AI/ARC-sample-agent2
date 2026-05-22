@@ -4,5 +4,4 @@
 .venv
 venv
 uv.lock
-logs/*.json
-cost.json
+logs/
