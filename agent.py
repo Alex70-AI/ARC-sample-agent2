@@ -20,7 +20,7 @@ from typing import Annotated, Any, List, Literal, Union
 
 from annotated_types import MaxLen, MinLen
 from openai import OpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ogchallenge_client import CoreClient, MaintenanceClient, TaskInfo, ApiException
 from ogchallenge_client.dtos import (
@@ -57,6 +57,7 @@ WRITE_ACTION_TYPES = {
     "operation_add",
     "operation_update",
     "wiki_update",
+    "wiki_section_insert",
 }
 GROUND_REF_TYPES = {
     "equipment",
@@ -67,6 +68,28 @@ GROUND_REF_TYPES = {
     "operation",
     "wiki",
 }
+OSS_MODEL_MARKERS = ("gpt-oss",)
+OSS_STEP_MAX_TOKENS = 2048
+OSS_WIKI_STEP_MAX_TOKENS = 4096
+OSS_REPAIR_MAX_TOKENS = 1024
+OSS_CURRENT_STATE_MAX_CHARS = 600
+OSS_PLAN_ITEM_MAX_CHARS = 180
+OSS_GATE_CHECK_MAX_CHARS = 180
+OSS_WIKI_INSERT_MAX_CHARS = 500
+OSS_JSON_CONTRACT = (
+    "Return exactly one JSON object. Do not use markdown. Do not include text outside JSON.\n"
+    "Required wrapper keys: task_type, current_state, gate_checks, plan, ready_to_respond, task_completed, function.\n"
+    "current_state must be <=600 chars. Each plan and gate_checks item must be <=180 chars.\n"
+    "If finished, use function.type=\"respond\".\n"
+    "For simple wiki section insertions, prefer function.type=\"wiki_section_insert\" instead of emitting full wiki_update.content."
+)
+OSS_REPAIR_CONTRACT = (
+    "Your previous response was invalid for the required JSON schema.\n"
+    "Return one complete valid JSON object only. No markdown, no comments, no surrounding text.\n"
+    "Use the required wrapper keys: task_type, current_state, gate_checks, plan, ready_to_respond, task_completed, function.\n"
+    "If the task is complete or blocked, use function.type=\"respond\".\n"
+    "Do not emit long document content. For simple wiki section insertions use function.type=\"wiki_section_insert\"."
+)
 
 
 @dataclass(frozen=True)
@@ -177,7 +200,8 @@ class HarnessState:
         fn_type = getattr(fn, "type", "")
         args = fn.model_dump(exclude_none=True) if hasattr(fn, "model_dump") else {}
         if fn_type.startswith("wiki_") and args.get("path"):
-            self._remember(self.write_refs if fn_type == "wiki_update" else self.read_refs, f"wiki:{args['path']}")
+            write_wiki = fn_type in {"wiki_update", "wiki_section_insert"}
+            self._remember(self.write_refs if write_wiki else self.read_refs, f"wiki:{args['path']}")
         if fn_type in WRITE_ACTION_TYPES and _is_write_success(fn_type, result_payload):
             _collect_write_arg_refs(fn_type, args, self.write_refs)
             _collect_entity_refs(result_payload, self.write_refs)
@@ -381,6 +405,8 @@ def _write_arg_ref_tokens(fn_type: str, args: dict[str, Any]) -> list[str]:
         "wo_update": (("work_order", "wo_id"), ("equipment", "floc")),
         "operation_add": (("work_order", "workorder_id"),),
         "operation_update": (("work_order", "workorder_id"), ("operation", "op_id")),
+        "wiki_update": (("wiki", "path"),),
+        "wiki_section_insert": (("wiki", "path"),),
     }
     refs: list[str] = []
     for ref_type, arg_name in arg_refs.get(fn_type, ()):
@@ -682,12 +708,40 @@ Action = Union[
     Req_Respond,
 ]
 
+
+class Req_WikiSectionInsert(BaseModel):
+    type: Literal["wiki_section_insert"] = "wiki_section_insert"
+    path: str
+    section_heading: str
+    insert_text: Annotated[str, MaxLen(OSS_WIKI_INSERT_MAX_CHARS)]
+    updated_by: str | None = None
+
+
+OssAction = Union[
+    Req_EquipmentList, Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
+    Req_EmployeeList, Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
+    Req_MaterialList, Req_MaterialGet, Req_MaterialSearch, Req_MaterialReorder,
+    Req_NotifCreate, Req_NotifGet, Req_NotifSearch, Req_NotifUpdate,
+    Req_WOList, Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
+    Req_OperationAdd, Req_OperationUpdate, Req_OperationList,
+    Req_WikiTree, Req_WikiLoad, Req_WikiSearch, Req_WikiUpdate,
+    Req_WikiSectionInsert,
+    Req_Respond,
+]
+
 # OpenRouter and many non-OpenAI models are more reliable with explicit
 # discriminator metadata on unions.
 DiscriminatedAction = Annotated[
     Action,
     Field(discriminator="type"),
 ]
+OssDiscriminatedAction = Annotated[
+    OssAction,
+    Field(discriminator="type"),
+]
+ShortState = Annotated[str, MaxLen(OSS_CURRENT_STATE_MAX_CHARS)]
+PlanItem = Annotated[str, MaxLen(OSS_PLAN_ITEM_MAX_CHARS)]
+GateCheck = Annotated[str, MaxLen(OSS_GATE_CHECK_MAX_CHARS)]
 
 
 class NextStep(BaseModel):
@@ -737,6 +791,32 @@ class NextStepDiscriminated(BaseModel):
     )
     task_completed: bool = Field(False, description="Set to true only when calling respond")
     function: DiscriminatedAction = Field(
+        ...,
+        description="The next API call to execute",
+    )
+
+
+class NextStepDiscriminatedOss(BaseModel):
+    """OSS-specific schema with capped wrapper fields and one internal helper action."""
+
+    task_type: TaskType = Field(
+        "unknown",
+        description="Classify this task as lookup, write, review, or unknown.",
+    )
+    current_state: ShortState = Field(..., description="Brief summary of what you know so far")
+    gate_checks: Annotated[List[GateCheck], MaxLen(6)] = Field(
+        default_factory=list,
+        description="Short evidence checks completed or still required before writes/respond.",
+    )
+    plan: Annotated[List[PlanItem], MinLen(1), MaxLen(5)] = Field(
+        ..., description="Remaining 3 steps to complete the task (most important first)"
+    )
+    ready_to_respond: bool = Field(
+        False,
+        description="True when evidence and side-effect checks are sufficient to call respond now.",
+    )
+    task_completed: bool = Field(False, description="Set to true only when calling respond")
+    function: OssDiscriminatedAction = Field(
         ...,
         description="The next API call to execute",
     )
@@ -797,16 +877,280 @@ def _load_runtime_prompt() -> str:
 SYSTEM_PROMPT = _load_runtime_prompt()
 
 MAX_STEPS = 30
-COMMON_WIKI_DOCS = (
-    "index.md",
+BOOTSTRAP_WIKI_DOCS = (
     "system_reference/system.md",
-    "governance/raci.md",
-    "maintenance_and_integrity/notification_guidelines.md",
-    "maintenance_and_integrity/wo_guidelines.md",
-    "maintenance_and_integrity/work_planning.md",
-    "safety_and_risk/RAM.md",
-    "safety_and_risk/incidents.md",
 )
+
+
+@dataclass
+class OssRequestResult:
+    step: NextStepDiscriminatedOss | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    metadata: dict[str, Any]
+
+
+def _is_oss_openrouter_model(llm_config: LLMConfig) -> bool:
+    model = llm_config.model.lower()
+    return llm_config.provider == "openrouter" and any(marker in model for marker in OSS_MODEL_MARKERS)
+
+
+def _oss_max_tokens(task_text: str, harness_state: HarnessState) -> int:
+    text = task_text.lower()
+    mutating_doc_task = any(word in text for word in ("update", "add", "insert", "modify", "change"))
+    wiki_doc_task = any(word in text for word in ("wiki", "sop", "procedure", "work instruction"))
+    if harness_state.last_action == "wiki_load" and mutating_doc_task and wiki_doc_task:
+        return OSS_WIKI_STEP_MAX_TOKENS
+    return OSS_STEP_MAX_TOKENS
+
+
+def _oss_contract_msg() -> dict[str, str]:
+    return {"role": "user", "content": OSS_JSON_CONTRACT}
+
+
+def _oss_repair_msg() -> dict[str, str]:
+    return {"role": "user", "content": OSS_REPAIR_CONTRACT}
+
+
+def _usage_value(usage: Any, *names: str) -> int | None:
+    if usage is None:
+        return None
+    for name in names:
+        value = getattr(usage, name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _message_text(resp: Any) -> str:
+    try:
+        content = resp.choices[0].message.content
+    except Exception:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return "" if content is None else str(content)
+
+
+def _raw_snippet(raw: str | None, *, limit: int = 500) -> str:
+    return (raw or "")[:limit].replace("\r", " ").replace("\n", " ")
+
+
+def _parse_json_object(raw: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"invalid_json: {exc}"
+    if not isinstance(payload, dict):
+        return None, "schema_validation: top-level JSON value is not an object"
+    return payload, None
+
+
+def _direct_respond_step(payload: dict[str, Any], harness_state: HarnessState) -> NextStepDiscriminatedOss | None:
+    if not {"outcome", "message", "ground_refs"}.issubset(payload):
+        return None
+    try:
+        fn = Req_Respond(**payload)
+        return NextStepDiscriminatedOss(
+            task_type=harness_state.task_type or "unknown",
+            current_state="Direct OSS response normalized into respond action.",
+            gate_checks=[],
+            plan=["Respond with normalized OSS output."],
+            ready_to_respond=True,
+            task_completed=True,
+            function=fn,
+        )
+    except ValidationError:
+        return None
+
+
+def _validate_oss_step(raw: str, harness_state: HarnessState) -> tuple[NextStepDiscriminatedOss | None, str]:
+    try:
+        return NextStepDiscriminatedOss.model_validate_json(raw), ""
+    except ValidationError as exc:
+        payload, json_error = _parse_json_object(raw)
+        if payload is None:
+            return None, json_error or "invalid_json"
+        direct_step = _direct_respond_step(payload, harness_state)
+        if direct_step is not None:
+            return direct_step, "direct_respond_wrapped"
+        return None, f"schema_validation: {exc}"
+
+
+def _request_oss_step(
+    client: OpenAI,
+    *,
+    model: str,
+    messages: list[dict],
+    task_text: str,
+    harness_state: HarnessState,
+) -> OssRequestResult:
+    metadata: dict[str, Any] = {}
+    first_resp = client.chat.completions.create(
+        model=model,
+        messages=messages + [_oss_contract_msg()],
+        response_format={"type": "json_object"},
+        temperature=0,
+        max_tokens=_oss_max_tokens(task_text, harness_state),
+    )
+    raw = _message_text(first_resp)
+    metadata["raw_snippet"] = _raw_snippet(raw)
+    prompt_tokens = _usage_value(first_resp.usage, "prompt_tokens")
+    completion_tokens = _usage_value(first_resp.usage, "completion_tokens")
+
+    step, category = _validate_oss_step(raw, harness_state)
+    if step is not None:
+        if category:
+            metadata["parse_error_category"] = category
+            if category == "direct_respond_wrapped":
+                metadata["event"] = "oss_parse_failure_fallback"
+        return OssRequestResult(step, prompt_tokens, completion_tokens, metadata)
+
+    metadata["oss_repair_attempted"] = True
+    metadata["parse_error_category"] = "invalid_json" if category.startswith("invalid_json") else "schema_validation"
+    repair_resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            *messages,
+            _oss_contract_msg(),
+            {"role": "assistant", "content": raw[:4000]},
+            _oss_repair_msg(),
+        ],
+        response_format={"type": "json_object"},
+        temperature=0,
+        max_tokens=OSS_REPAIR_MAX_TOKENS,
+    )
+    repair_raw = _message_text(repair_resp)
+    metadata["repair_raw_snippet"] = _raw_snippet(repair_raw)
+    metadata["raw_snippet"] = metadata["repair_raw_snippet"] or metadata["raw_snippet"]
+    prompt_tokens = _usage_value(repair_resp.usage, "prompt_tokens") or prompt_tokens
+    completion_tokens = _usage_value(repair_resp.usage, "completion_tokens") or completion_tokens
+
+    step, repair_category = _validate_oss_step(repair_raw, harness_state)
+    if step is not None:
+        metadata["oss_repair_succeeded"] = True
+        if repair_category == "direct_respond_wrapped":
+            metadata["parse_error_category"] = "direct_respond_wrapped"
+            metadata["event"] = "oss_parse_failure_fallback"
+        return OssRequestResult(step, prompt_tokens, completion_tokens, metadata)
+
+    metadata["oss_repair_succeeded"] = False
+    metadata["parse_error_category"] = "repair_failed"
+    metadata["event"] = "oss_parse_failure_fallback"
+    metadata["repair_error"] = repair_category
+    return OssRequestResult(None, prompt_tokens, completion_tokens, metadata)
+
+
+def _normalize_wiki_heading(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
+def _insert_text_as_list_item(text: str) -> str:
+    cleaned = text.strip()
+    if re.match(r"^(?:[-*]\s+|\d+\.\s+)", cleaned):
+        return cleaned
+    return f"- {cleaned}"
+
+
+# Experimental OSS wiki edit helper: this avoids asking gpt-oss models to emit
+# large wiki_update.content payloads for simple section insertions. If repeated
+# runs fail because this helper creates malformed or incorrect wiki updates,
+# roll it back and return to model-generated wiki_update.content with validation.
+def _dispatch_wiki_section_insert(
+    maint: MaintenanceClient,
+    fn: Req_WikiSectionInsert,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    doc = _api_retry(
+        "wiki_section_insert wiki_load",
+        lambda: maint.wiki_load(fn.path),
+    )
+    lines = doc.content.splitlines()
+    requested = _normalize_wiki_heading(fn.section_heading)
+    safety_aliases = {"safety precautions", "safety prerequisites"}
+    allow_safety_aliases = "safety precautions" in requested
+
+    matches: list[tuple[int, int, str]] = []
+    for idx, line in enumerate(lines):
+        match = re.match(r"^(#+)\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        level = len(match.group(1))
+        heading = _normalize_wiki_heading(match.group(2))
+        if allow_safety_aliases:
+            matched = heading in safety_aliases
+        else:
+            matched = bool(requested and (requested in heading or heading in requested))
+        if matched:
+            matches.append((idx, level, heading))
+
+    if len(matches) != 1:
+        return (
+            _harness_block_payload(
+                reason="wiki_section_insert_unresolved_heading",
+                message=(
+                    f"Expected exactly one markdown heading matching {fn.section_heading!r}; "
+                    f"found {len(matches)}."
+                ),
+                suggested_next="wiki_load_or_explicit_wiki_update",
+            ),
+            None,
+        )
+
+    section_start_idx, heading_level, _heading = matches[0]
+    section_end_exclusive = len(lines)
+    for idx in range(section_start_idx + 1, len(lines)):
+        match = re.match(r"^(#+)\s+(.+?)\s*$", lines[idx])
+        if match and len(match.group(1)) <= heading_level:
+            section_end_exclusive = idx
+            break
+
+    section_lines = lines[section_start_idx:section_end_exclusive]
+    insert_line = _insert_text_as_list_item(fn.insert_text)
+    normalized_insert = _normalize_wiki_heading(insert_line)
+    normalized_section = _normalize_wiki_heading("\n".join(section_lines))
+    if normalized_insert and normalized_insert in normalized_section:
+        return {"ok": True, "action": "wiki_section_insert", "already_present": True}, None
+
+    insert_at = len(section_lines)
+    while insert_at > 1 and section_lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    updated_section_lines = [
+        *section_lines[:insert_at],
+        insert_line,
+        *section_lines[insert_at:],
+    ]
+    start_row = section_start_idx + 1
+    end_row = section_end_exclusive
+    content = "\n".join(updated_section_lines) + "\n"
+    update = Req_WikiUpdate(
+        path=fn.path,
+        start_row=start_row,
+        end_row=end_row,
+        content=content,
+        updated_by=fn.updated_by,
+    )
+    result = _api_retry(
+        "wiki_section_insert wiki_update",
+        lambda: maint.dispatch(update),
+    )
+    payload = result.model_dump(exclude_none=True)
+    if not payload:
+        payload = _success_payload("wiki_update")
+    return payload, {
+        "path": fn.path,
+        "start_row": start_row,
+        "end_row": end_row,
+        "content_chars": len(content),
+    }
 
 
 def run_agent(
@@ -838,6 +1182,7 @@ def run_agent(
     log.append({"role": "user", "content": task.task_text})
 
     response_model = _response_model_for_provider(llm_config.provider)
+    is_oss_model = _is_oss_openrouter_model(llm_config)
     harness_state = HarnessState(
         task_scope=_classify_task_scope(task.task_text),
         task_tokens=_task_distinctive_tokens(task.task_text),
@@ -860,6 +1205,10 @@ def run_agent(
         }
 
         t0 = time.time()
+        step: BaseModel | None = None
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        oss_metadata: dict[str, Any] = {}
         try:
             if llm_config.provider == "openai":
                 resp = client.responses.parse(
@@ -867,12 +1216,30 @@ def run_agent(
                     input=_to_responses_input(log + [harness_msg]),
                     text_format=response_model,
                 )
+                step = resp.output_parsed
+                prompt_tokens = resp.usage.input_tokens if resp.usage else None
+                completion_tokens = resp.usage.output_tokens if resp.usage else None
+            elif is_oss_model:
+                oss_result = _request_oss_step(
+                    client,
+                    model=llm_config.model,
+                    messages=log + [harness_msg],
+                    task_text=task.task_text,
+                    harness_state=harness_state,
+                )
+                step = oss_result.step
+                prompt_tokens = oss_result.prompt_tokens
+                completion_tokens = oss_result.completion_tokens
+                oss_metadata = oss_result.metadata
             else:
                 resp = client.beta.chat.completions.parse(
                     model=llm_config.model,
                     response_format=response_model,
                     messages=log + [harness_msg],
                 )
+                step = resp.choices[0].message.parsed
+                prompt_tokens = resp.usage.prompt_tokens if resp.usage else None
+                completion_tokens = resp.usage.completion_tokens if resp.usage else None
         except Exception as exc:
             raise RuntimeError(
                 "LLM request failed for "
@@ -882,17 +1249,43 @@ def run_agent(
             ) from exc
         elapsed_ms = int((time.time() - t0) * 1000)
         step_event["elapsed_ms"] = elapsed_ms
-
-        if llm_config.provider == "openai":
-            step = resp.output_parsed
-            prompt_tokens = resp.usage.input_tokens if resp.usage else None
-            completion_tokens = resp.usage.output_tokens if resp.usage else None
-        else:
-            step = resp.choices[0].message.parsed
-            prompt_tokens = resp.usage.prompt_tokens if resp.usage else None
-            completion_tokens = resp.usage.completion_tokens if resp.usage else None
+        if oss_metadata:
+            step_event.update(oss_metadata)
 
         if step is None:
+            if is_oss_model:
+                fallback_fn = Req_Respond(
+                    outcome="error_internal",
+                    message="The model returned invalid structured output and the repair attempt failed.",
+                    ground_refs=_ground_refs_from_tokens(
+                        [
+                            *(harness_state.write_refs or []),
+                            *(harness_state.read_refs or []),
+                            *(harness_state.support_refs or []),
+                        ]
+                    ),
+                )
+                try:
+                    _api_retry(
+                        "oss parse failure fallback respond",
+                        lambda: maint.dispatch(fallback_fn),
+                    )
+                    result_payload = _success_payload("respond")
+                except Exception as exc:
+                    result_payload = {"error": str(exc)}
+                    step_event["error"] = str(exc)
+                step_event.update({
+                    "event": "oss_parse_failure_fallback",
+                    "function_type": "respond",
+                    "function_args": fallback_fn.model_dump(exclude_none=True, exclude={"type"}),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "result": result_payload,
+                })
+                print(f"{CLI_RED}OSS parse failed after repair; submitted error_internal response{CLI_CLR}")
+                if run_logger:
+                    run_logger.record_step(**step_event)
+                break
             print(f"{CLI_RED}LLM returned unparseable response{CLI_CLR}")
             step_event["error"] = "LLM returned unparseable response"
             if run_logger:
@@ -1080,20 +1473,35 @@ def run_agent(
         else:
             consecutive_blocked_steps = 0
             try:
-                result = _api_retry(
-                    f"maintenance API call {fn_type}",
-                    lambda: maint.dispatch(fn),
-                )
-                result_payload = result.model_dump(exclude_none=True)
-                if result_payload:
-                    result_text = result.model_dump_json(exclude_none=True)
+                if isinstance(fn, Req_WikiSectionInsert):
+                    result_payload, wiki_update_args = _dispatch_wiki_section_insert(maint, fn)
+                    result_text = json.dumps(result_payload, ensure_ascii=False)
+                    if wiki_update_args is not None:
+                        step_event["internal_dispatch"] = "wiki_update"
+                        step_event["wiki_update_args"] = wiki_update_args
+                    if isinstance(result_payload, dict) and result_payload.get("harness_blocked"):
+                        print(f"    {CLI_YELLOW}BLOCKED {result_payload['reason']}{CLI_CLR}")
+                        step_event["harness_block"] = result_payload["reason"]
+                        consecutive_blocked_steps += 1
+                    elif _is_write_success(fn_type, result_payload):
+                        successful_write_signatures.add(action_signature)
+                    print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
+                    step_event["result"] = result_payload
                 else:
-                    result_text = json.dumps(_success_payload(fn_type))
-                    result_payload = json.loads(result_text)
-                if _is_write_success(fn_type, result_payload):
-                    successful_write_signatures.add(action_signature)
-                print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
-                step_event["result"] = result_payload
+                    result = _api_retry(
+                        f"maintenance API call {fn_type}",
+                        lambda: maint.dispatch(fn),
+                    )
+                    result_payload = result.model_dump(exclude_none=True)
+                    if result_payload:
+                        result_text = result.model_dump_json(exclude_none=True)
+                    else:
+                        result_text = json.dumps(_success_payload(fn_type))
+                        result_payload = json.loads(result_text)
+                    if _is_write_success(fn_type, result_payload):
+                        successful_write_signatures.add(action_signature)
+                    print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
+                    step_event["result"] = result_payload
             except ApiException as exc:
                 result_payload = {
                     "error": exc.api_error.error,
@@ -1233,7 +1641,7 @@ def _bootstrap(maint: MaintenanceClient) -> list[tuple[str, str]]:
     except Exception as exc:
         results.append(("wiki_tree", f"error: {exc}"))
 
-    for path in COMMON_WIKI_DOCS:
+    for path in BOOTSTRAP_WIKI_DOCS:
         try:
             doc = _api_retry(
                 f"bootstrap wiki_load:{path}",

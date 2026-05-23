@@ -12,6 +12,20 @@ from pathlib import Path
 import re
 from typing import Any
 
+WRITE_ACTION_TYPES = {
+    "equipment_update",
+    "employee_update",
+    "material_reorder",
+    "notif_create",
+    "notif_update",
+    "wo_create",
+    "wo_update",
+    "operation_add",
+    "operation_update",
+    "wiki_update",
+    "wiki_section_insert",
+}
+
 
 class RunLogger:
     """Append-only-ish JSON logger for one main.py invocation."""
@@ -38,12 +52,14 @@ class RunLogger:
         self.cost_table = _load_cost_table(Path(cost_path))
         self.harness_version = load_harness_version(version_path)
         self.data: dict[str, Any] = {
+            "log_schema_version": 3,
             "mode": mode,
             "harness_version": self.harness_version,
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "ended_at": None,
             "status": "running",
             "metadata": {},
+            "bootstrap_manifest": {},
             "usage": _empty_usage(),
             "session": {},
             "tasks": [],
@@ -97,7 +113,11 @@ class RunLogger:
 
     def record_bootstrap(self, label: str, text: str) -> None:
         task = self._require_task()
-        task["bootstrap"].append(_compact_bootstrap(label, text))
+        entry = _compact_bootstrap(label, text)
+        if label == "system" or entry.get("ok") is False:
+            task["bootstrap"].append(entry)
+        else:
+            _merge_bootstrap_manifest(self.data["bootstrap_manifest"], entry)
         self.flush()
 
     def record_step(self, **step: Any) -> None:
@@ -126,6 +146,7 @@ class RunLogger:
             task["status"] = status
         task["ended_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         task["result"].update(_jsonable(result))
+        task["analysis"] = _task_analysis(task)
         self._refresh_usage()
         self._current_task = None
         self.flush()
@@ -216,12 +237,57 @@ def _compact_bootstrap(label: str, text: str) -> dict[str, Any]:
     return entry
 
 
+def _merge_bootstrap_manifest(manifest: dict[str, Any], entry: dict[str, Any]) -> None:
+    label = entry.get("label")
+    if not isinstance(label, str):
+        return
+    if label == "wiki_tree":
+        target = manifest.setdefault("wiki_tree", {})
+        target["ok"] = entry.get("ok")
+        target["chars"] = entry.get("chars")
+        target["item_count"] = len(entry.get("items") or []) + int(entry.get("truncated_items") or 0)
+        if entry.get("truncated_items"):
+            target["truncated_items"] = entry.get("truncated_items")
+        target["seen_count"] = int(target.get("seen_count") or 0) + 1
+        return
+    if label.startswith("wiki_load:"):
+        docs = manifest.setdefault("wiki_loads", {})
+        doc = docs.setdefault(label.removeprefix("wiki_load:"), {})
+        doc["ok"] = entry.get("ok")
+        doc["chars"] = entry.get("chars")
+        doc["seen_count"] = int(doc.get("seen_count") or 0) + 1
+        return
+    other = manifest.setdefault("other", {})
+    target = other.setdefault(label, {})
+    target["ok"] = entry.get("ok")
+    target["chars"] = entry.get("chars")
+    target["seen_count"] = int(target.get("seen_count") or 0) + 1
+
+
 def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
+    fn_type = step.get("function_type")
     compact: dict[str, Any] = {
         "step": step.get("step"),
-        "fn": step.get("function_type"),
+        "fn": fn_type,
         "ms": step.get("elapsed_ms"),
     }
+    if fn_type in WRITE_ACTION_TYPES:
+        compact["is_write"] = True
+    raw_result = step.get("result")
+    if (
+        step.get("harness_block")
+        or (
+            isinstance(raw_result, dict)
+            and (
+                raw_result.get("harness_blocked")
+                or raw_result.get("duplicate_successful_write_blocked")
+            )
+        )
+    ):
+        compact["is_blocked"] = True
+    function_args = step.get("function_args")
+    if fn_type == "respond" and isinstance(function_args, dict) and function_args.get("outcome"):
+        compact["outcome"] = function_args.get("outcome")
     if step.get("task_type") and step.get("task_type") != "unknown":
         compact["task_type"] = step.get("task_type")
     plan = step.get("plan")
@@ -232,8 +298,8 @@ def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
     gate_checks = step.get("gate_checks")
     if isinstance(gate_checks, list) and gate_checks:
         compact["gates"] = [_truncate(str(item), 160) for item in gate_checks[:4]]
-    if step.get("function_args"):
-        compact["args"] = _compact_value(step["function_args"])
+    if function_args:
+        compact["args"] = _compact_value(function_args)
     if step.get("api_error"):
         compact["error"] = _compact_value(step["api_error"])
     elif step.get("error"):
@@ -290,6 +356,36 @@ def _compact_candidate_ledger(value: dict[str, Any]) -> dict[str, Any]:
         for key in ("entity_type", "count", "ids", "source_action")
         if value.get(key) not in (None, {}, [], "")
     }
+
+
+def _task_analysis(task: dict[str, Any]) -> dict[str, Any]:
+    steps = task.get("steps") if isinstance(task.get("steps"), list) else []
+    final_outcome = None
+    write_count = 0
+    blocked_count = 0
+    step_error_count = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if step.get("is_write"):
+            write_count += 1
+        if step.get("is_blocked"):
+            blocked_count += 1
+        if step.get("error"):
+            step_error_count += 1
+        if step.get("fn") == "respond" and step.get("outcome"):
+            final_outcome = step.get("outcome")
+
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    analysis = {
+        "final_outcome": final_outcome,
+        "score": result.get("score"),
+        "step_count": len(steps),
+        "write_count": write_count,
+        "blocked_count": blocked_count,
+        "error_count": step_error_count + len(task.get("errors") or []),
+    }
+    return {k: v for k, v in analysis.items() if v not in (None, {}, [], "")}
 
 
 def _compact_result(value: Any) -> Any:

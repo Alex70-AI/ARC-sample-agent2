@@ -121,6 +121,16 @@ def _build_llm_config() -> LLMConfig:
     )
 
 
+def _arc_session_name(model: str) -> str:
+    base_name = os.getenv("ARC_AGENT_NAME", DEFAULT_ARC_AGENT_NAME).strip()
+    if not base_name:
+        base_name = DEFAULT_ARC_AGENT_NAME
+    model_suffix = f"({model})"
+    if base_name.endswith(model_suffix):
+        return base_name
+    return f"{base_name} {model_suffix}"
+
+
 def _preflight_platform(api: CoreClient) -> None:
     print(f"Checking platform connectivity at {api.base_url} ...")
     try:
@@ -216,8 +226,7 @@ def run_session(
         lambda: api.start_session(
             benchmark="maintenance-ops",
             workspace=workspace,
-            name=os.getenv("ARC_AGENT_NAME", DEFAULT_ARC_AGENT_NAME).strip()
-            or DEFAULT_ARC_AGENT_NAME,
+            name=_arc_session_name(llm_config.model),
             architecture=f"{llm_config.provider} structured-output agent",
         ),
     )
@@ -396,5 +405,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 

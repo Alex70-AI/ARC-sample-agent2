@@ -15,7 +15,7 @@ agent.py  - agent loop + structured output schema + bootstrap
 
 The agent uses a structured-output loop (no traditional tool_use):
 
-1. Bootstrap - auto-runs `system` and `wiki_tree` before the LLM starts
+1. Bootstrap - auto-runs `system`, `wiki_tree`, and `system_reference/system.md` before the LLM starts
 2. Loop - LLM returns a `NextStep` Pydantic model on each iteration:
    - `current_state` - what the agent knows so far
    - `plan` - remaining steps (1-5)
@@ -112,7 +112,7 @@ This means configuration problems fail early with clear errors, for example:
 ## Customization Ideas
 
 - Better prompting - improve the system prompt with domain knowledge
-- Bootstrap - load more wiki docs upfront (RAM.md, raci.md)
+- Wiki retrieval - improve on-demand loading of relevant policy, SOP, and risk docs
 - Multi-step planning - add chain-of-thought reasoning
 - Error recovery - retry or adapt when API calls fail
 - Different LLM - swap OpenAI for Anthropic, Gemini, or local models

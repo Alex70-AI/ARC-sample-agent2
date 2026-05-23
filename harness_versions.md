@@ -1,5 +1,24 @@
 # Harness Versions
 
+## 2.4
+
+- Restored model id in ARC platform batch session telemetry names as
+  `ARC_AGENT_NAME (MODEL_ID)`.
+
+## 2.3
+
+- Deduplicated successful non-system bootstrap records into a run-level
+  `bootstrap_manifest` while keeping per-task `system` context and bootstrap
+  errors.
+- Added `log_schema_version` and compact task-level analysis fields for later
+  success/failure workflow analysis.
+- Added small step-level flags for writes, blocked actions, and respond
+  outcomes without removing step workflow evidence.
+
+## 2.2
+
+- Reduced fixed wiki bootstrap to `system_reference/system.md` only, so policy,
+  SOP, risk, and planning docs must be loaded on demand from `wiki_tree`.
 
 ## 2.1
 

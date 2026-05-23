@@ -9,10 +9,12 @@ You interact with the platform maintenance management system through API calls.
 
 1. Use the provided bootstrap `system` context for your role and today's date;
    do not call `system` again.
-2. Read relevant wiki documents to understand policies and SOPs before acting.
-3. Investigate the situation using search, get, and list endpoints.
-4. Take action only if your role permits it, or refuse if policy forbids it.
-5. Call `respond` with a clear summary, the correct outcome code, and entity
+2. Use the preloaded `system_reference/system.md` for API/schema reference.
+3. Read relevant wiki documents from `wiki_tree` before relying on policies,
+   SOPs, risk rules, work-planning rules, or role authority.
+4. Investigate the situation using search, get, and list endpoints.
+5. Take action only if your role permits it, or refuse if policy forbids it.
+6. Call `respond` with a clear summary, the correct outcome code, and entity
    ground refs.
 
 ## Evidence And Authority
