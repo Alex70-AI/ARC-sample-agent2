@@ -1,6 +1,6 @@
-"""Small run harness for ARC sample-agent experiments.
+"""Small run logger for ARC sample-agent experiments.
 
-The harness is intentionally local-only: it records task metadata, agent steps,
+The logger is intentionally local-only: it records task metadata, agent steps,
 scores, and terminal errors to JSON so batch and single-task runs can be
 compared without changing the ARC platform interaction model.
 """
@@ -23,12 +23,18 @@ class RunLogger:
         root: str | Path = "logs",
         cost_path: str | Path = "cost.json",
         version_path: str | Path = "harness_versions.md",
+        model: str | None = None,
     ) -> None:
         if mode not in {"batch", "task"}:
             raise ValueError(f"Unsupported log mode: {mode!r}")
         self.mode = mode
         self.started_at = datetime.now().astimezone()
-        self.path = self._next_path(Path(root), mode, self.started_at)
+        self.path = self._next_path(
+            Path(root),
+            mode,
+            self.started_at,
+            model_suffix=_model_log_suffix(model),
+        )
         self.cost_table = _load_cost_table(Path(cost_path))
         self.harness_version = load_harness_version(version_path)
         self.data: dict[str, Any] = {
@@ -48,12 +54,15 @@ class RunLogger:
         self.flush()
 
     @staticmethod
-    def _next_path(root: Path, mode: str, stamp: datetime) -> Path:
+    def _next_path(root: Path, mode: str, stamp: datetime, *, model_suffix: str) -> Path:
         folder = root / ("batch" if mode == "batch" else "tasks")
         folder.mkdir(parents=True, exist_ok=True)
         prefix = "b" if mode == "batch" else "t"
-        stem = f"{prefix}_{stamp.strftime('%d%m%y_%H%M')}"
-        for idx in range(1, 1000):
+        stem = f"{prefix}_{stamp.strftime('%d%m%y_%H%M')}_{model_suffix}"
+        candidate = folder / f"{stem}.json"
+        if not candidate.exists():
+            return candidate
+        for idx in range(2, 1000):
             candidate = folder / f"{stem}_{idx:03d}.json"
             if not candidate.exists():
                 return candidate
@@ -238,16 +247,59 @@ def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
             refs["read"] = harness_state["read_refs"][-8:]
         if harness_state.get("write_refs"):
             refs["write"] = harness_state["write_refs"][-8:]
+        if harness_state.get("support_refs"):
+            refs["support"] = harness_state["support_refs"][-8:]
         if refs:
             compact["refs"] = refs
+        if harness_state.get("task_scope"):
+            compact["task_scope"] = harness_state["task_scope"]
         if harness_state.get("writes_completed"):
             compact["writes_completed"] = harness_state["writes_completed"]
+        open_ambiguities = harness_state.get("open_ambiguities")
+        if isinstance(open_ambiguities, list):
+            compact_ambiguities = [
+                _compact_ambiguity(item)
+                for item in open_ambiguities[-4:]
+                if isinstance(item, dict) and item.get("status") == "open"
+            ]
+            if compact_ambiguities:
+                compact["open_ambiguities"] = compact_ambiguities
+        candidate_ledger = harness_state.get("candidate_ledger")
+        if isinstance(candidate_ledger, list) and candidate_ledger:
+            compact["candidate_ledger"] = [
+                _compact_candidate_ledger(item)
+                for item in candidate_ledger[-3:]
+                if isinstance(item, dict)
+            ]
+        if harness_state.get("ambiguity_nudges"):
+            compact["ambiguity_nudges"] = harness_state["ambiguity_nudges"]
     return {k: v for k, v in compact.items() if v not in (None, {}, [], "")}
+
+
+def _compact_ambiguity(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value.get(key)
+        for key in ("entity_type", "count", "candidate_ids", "source_action")
+        if value.get(key) not in (None, {}, [], "")
+    }
+
+
+def _compact_candidate_ledger(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value.get(key)
+        for key in ("entity_type", "count", "ids", "source_action")
+        if value.get(key) not in (None, {}, [], "")
+    }
 
 
 def _compact_result(value: Any) -> Any:
     if not isinstance(value, dict):
         return _truncate(str(value), 500)
+    if value.get("harness_blocked"):
+        return {
+            "blocked": value.get("reason"),
+            "suggested_next": value.get("suggested_next"),
+        }
     if value.get("duplicate_successful_write_blocked"):
         return {
             "blocked_duplicate_write": True,
@@ -313,6 +365,44 @@ def _load_cost_table(path: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _model_log_suffix(model: str | None) -> str:
+    """Return a compact, recognizable model id for log filenames."""
+    if not model:
+        return "unk"
+
+    raw = model.strip().lower().split("/")[-1]
+    raw = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", raw)
+
+    if "nemotron" in raw:
+        return "nmtr"
+
+    oss_match = re.search(r"gpt[-_]?oss[-_]?(\d+)b", raw)
+    if oss_match:
+        return f"g{oss_match.group(1)}"
+
+    gemini_match = re.search(r"gemini[-_]?(\d+(?:\.\d+)?)", raw)
+    if gemini_match:
+        version = gemini_match.group(1).replace(".", "")
+        family = ""
+        if "flash" in raw:
+            family = "f"
+        elif "pro" in raw:
+            family = "p"
+        return f"gm{version}{family}"
+
+    gpt_match = re.search(r"gpt[-_]?(\d+(?:\.\d+)?)", raw)
+    if gpt_match:
+        version = gpt_match.group(1)
+        compact_version = version.replace(".", "") if version.startswith("4.") else version
+        suffix = "m" if "mini" in raw else ""
+        return f"g{compact_version}{suffix}"
+
+    tokens = re.findall(r"[a-z0-9]+", raw)
+    if not tokens:
+        return "unk"
+    return "".join(token[0] if token.isalpha() else token for token in tokens)[:6]
 
 
 def load_harness_version(path: str | Path = "harness_versions.md") -> str:

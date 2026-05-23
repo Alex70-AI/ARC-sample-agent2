@@ -68,6 +68,7 @@ make task SPEC=notification_raise   # single task
 |----------|---------|-------------|
 | `ARC_BASE_URL` | `https://agentreliabilitychallenge.com` | ARC server URL |
 | `ARC_API_KEY` | - | API key for platform access |
+| `ARC_AGENT_NAME` | `ARC_Agent_70` | Session name recorded on the ARC platform |
 | `MODEL_PROVIDER` | `openai` | LLM provider: `openai` or `openrouter` |
 | `MODEL_ID` | `gpt-4.1-2025-04-14` | Model to use |
 | `OPENAI_API_KEY` | - | OpenAI API key |

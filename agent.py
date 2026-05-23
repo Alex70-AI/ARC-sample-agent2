@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
+import re
 import time
 from typing import Callable, TypeVar
 from typing import Annotated, Any, List, Literal, Union
@@ -22,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from ogchallenge_client import CoreClient, MaintenanceClient, TaskInfo, ApiException
 from ogchallenge_client.dtos import (
-    Req_System,
+    GroundRef,
     Req_EquipmentList, Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
     Req_EmployeeList, Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
     Req_MaterialList, Req_MaterialGet, Req_MaterialSearch, Req_MaterialReorder,
@@ -32,7 +34,7 @@ from ogchallenge_client.dtos import (
     Req_WikiTree, Req_WikiLoad, Req_WikiSearch, Req_WikiUpdate,
     Req_Respond,
 )
-from harness import RunLogger
+from run_logging import RunLogger
 
 CLI_GREEN = "\x1b[32m"
 CLI_RED = "\x1b[31m"
@@ -55,6 +57,15 @@ WRITE_ACTION_TYPES = {
     "operation_add",
     "operation_update",
     "wiki_update",
+}
+GROUND_REF_TYPES = {
+    "equipment",
+    "employee",
+    "material",
+    "notification",
+    "work_order",
+    "operation",
+    "wiki",
 }
 
 
@@ -89,14 +100,28 @@ class HarnessState:
     last_result: str = ""
     steps_taken: int = 0
     writes_completed: int = 0
+    task_scope: str = "single_target"
+    task_tokens: list[str] | None = None
     read_refs: list[str] | None = None
     write_refs: list[str] | None = None
+    support_refs: list[str] | None = None
+    candidate_ledger: list[dict[str, Any]] | None = None
+    open_ambiguities: list[dict[str, Any]] | None = None
+    ambiguity_nudges: int = 0
 
     def __post_init__(self) -> None:
+        if self.task_tokens is None:
+            self.task_tokens = []
         if self.read_refs is None:
             self.read_refs = []
         if self.write_refs is None:
             self.write_refs = []
+        if self.support_refs is None:
+            self.support_refs = []
+        if self.candidate_ledger is None:
+            self.candidate_ledger = []
+        if self.open_ambiguities is None:
+            self.open_ambiguities = []
 
     def render(self, *, steps_left: int) -> str:
         budget = ""
@@ -112,14 +137,18 @@ class HarnessState:
             "steps_taken": self.steps_taken,
             "steps_left": steps_left,
             "writes_completed": self.writes_completed,
+            "task_scope": self.task_scope,
             "last_action": self.last_action,
             "last_result": self.last_result,
             "read_refs": self.read_refs[-12:],
             "write_refs": self.write_refs[-12:],
+            "support_refs": self.support_refs[-8:],
+            "open_ambiguities": self.unresolved_ambiguities()[-4:],
             "last_state": self.last_state,
             "instructions": [
                 "Use this as scratchpad state, not as task evidence.",
                 "Do not repeat a successful write.",
+                "If open_ambiguities remain and no evidence selects one candidate, respond none_clarification_needed.",
                 "Before respond, verify outcome, side effects, and ground_refs.",
             ],
         }
@@ -137,22 +166,110 @@ class HarnessState:
         fn_type = getattr(fn, "type", type(fn).__name__)
         self.last_action = fn_type
         self.last_result = _summarize_result(result_payload)
-        if (
-            fn_type in WRITE_ACTION_TYPES
-            and not (
-                isinstance(result_payload, dict)
-                and result_payload.get("duplicate_successful_write_blocked")
-            )
-        ):
+        if _is_write_success(fn_type, result_payload):
             self.writes_completed += 1
         self._collect_refs(fn, result_payload)
+        self._update_candidate_ledger(fn, result_payload)
+        if fn_type == "respond" and getattr(fn, "outcome", "") == "none_clarification_needed":
+            self._resolve_open_ambiguities("responded_clarification")
 
     def _collect_refs(self, fn: Any, result_payload: Any) -> None:
         fn_type = getattr(fn, "type", "")
         args = fn.model_dump(exclude_none=True) if hasattr(fn, "model_dump") else {}
         if fn_type.startswith("wiki_") and args.get("path"):
             self._remember(self.write_refs if fn_type == "wiki_update" else self.read_refs, f"wiki:{args['path']}")
-        _collect_entity_refs(result_payload, self.read_refs, self.write_refs)
+        if fn_type in WRITE_ACTION_TYPES and _is_write_success(fn_type, result_payload):
+            _collect_write_arg_refs(fn_type, args, self.write_refs)
+            _collect_entity_refs(result_payload, self.write_refs)
+        elif fn_type != "respond":
+            _collect_entity_refs(result_payload, self.read_refs)
+
+    def _update_candidate_ledger(self, fn: Any, result_payload: Any) -> None:
+        fn_type = getattr(fn, "type", "")
+        if fn_type in WRITE_ACTION_TYPES or fn_type == "respond" or not _is_success_payload(result_payload):
+            return
+        args = fn.model_dump(exclude_none=True, exclude={"type"}) if hasattr(fn, "model_dump") else {}
+        for entity_type, candidates in _extract_collection_candidates(result_payload).items():
+            ids = [candidate["id"] for candidate in candidates]
+            entry = {
+                "entity_type": entity_type,
+                "count": len(candidates),
+                "ids": ids[:8],
+                "source_action": fn_type,
+                "query": _compact_query_args(args),
+            }
+            self.candidate_ledger.append(entry)
+            del self.candidate_ledger[:-12]
+            if len(candidates) > 1 and self.task_scope == "single_target":
+                self._remember_ambiguity(entity_type, candidates, fn_type, args)
+            elif len(candidates) == 1:
+                self._resolve_if_narrowed(entity_type, ids[0])
+
+    def _remember_ambiguity(
+        self,
+        entity_type: str,
+        candidates: list[dict[str, str]],
+        source_action: str,
+        args: dict[str, Any],
+    ) -> None:
+        ids = [candidate["id"] for candidate in candidates]
+        key = f"{entity_type}:{','.join(ids)}"
+        resolved_by = _resolve_candidates_by_task_tokens(self.task_tokens or [], candidates)
+        ambiguity = {
+            "key": key,
+            "entity_type": entity_type,
+            "count": len(candidates),
+            "candidate_ids": ids[:8],
+            "candidate_labels": [candidate.get("label", "") for candidate in candidates[:4]],
+            "source_action": source_action,
+            "query": _compact_query_args(args),
+            "status": "resolved" if resolved_by else "open",
+        }
+        if resolved_by:
+            ambiguity["resolved_by"] = resolved_by
+        for idx, existing in enumerate(self.open_ambiguities):
+            if existing.get("key") == key:
+                self.open_ambiguities[idx] = ambiguity
+                return
+        self.open_ambiguities.append(ambiguity)
+        del self.open_ambiguities[:-6]
+
+    def _resolve_if_narrowed(self, entity_type: str, candidate_id: str) -> None:
+        for ambiguity in self.open_ambiguities:
+            if (
+                ambiguity.get("status") == "open"
+                and ambiguity.get("entity_type") == entity_type
+                and candidate_id in ambiguity.get("candidate_ids", [])
+            ):
+                ambiguity["status"] = "resolved"
+                ambiguity["resolved_by"] = candidate_id
+
+    def _resolve_open_ambiguities(self, reason: str) -> None:
+        for ambiguity in self.open_ambiguities:
+            if ambiguity.get("status") == "open":
+                ambiguity["status"] = "resolved"
+                ambiguity["resolved_by"] = reason
+
+    def unresolved_ambiguities(self) -> list[dict[str, Any]]:
+        return [
+            ambiguity
+            for ambiguity in (self.open_ambiguities or [])
+            if ambiguity.get("status") == "open"
+        ]
+
+    def should_nudge_ambiguity(self, fn: Req_Respond) -> bool:
+        return (
+            fn.outcome == "ok_answer"
+            and self.ambiguity_nudges < 1
+            and bool(self.unresolved_ambiguities())
+        )
+
+    def record_ambiguity_nudge(self) -> None:
+        self.ambiguity_nudges += 1
+
+    def remember_support_refs(self, refs: list[str]) -> None:
+        for ref in refs:
+            self._remember(self.support_refs, ref)
 
     @staticmethod
     def _remember(target: list[str] | None, value: str) -> None:
@@ -202,13 +319,84 @@ def _summarize_result(result_payload: Any, *, limit: int = 600) -> str:
     return text if len(text) <= limit else text[:limit] + "... [truncated]"
 
 
-def _collect_entity_refs(result_payload: Any, read_refs: list[str] | None, write_refs: list[str] | None) -> None:
+def _is_success_payload(result_payload: Any) -> bool:
+    if not isinstance(result_payload, dict):
+        return True
+    if result_payload.get("error") or result_payload.get("api_error"):
+        return False
+    if result_payload.get("duplicate_successful_write_blocked") or result_payload.get("harness_blocked"):
+        return False
+    return True
+
+
+def _is_write_success(fn_type: str, result_payload: Any) -> bool:
+    return fn_type in WRITE_ACTION_TYPES and _is_success_payload(result_payload)
+
+
+def _success_payload(fn_type: str) -> dict[str, Any]:
+    if fn_type == "respond":
+        return {
+            "ok": True,
+            "action": fn_type,
+            "message": "Answer submitted.",
+        }
+    if fn_type in WRITE_ACTION_TYPES:
+        return {
+            "ok": True,
+            "action": fn_type,
+            "message": (
+                "Write completed successfully. "
+                "Do not repeat this write unless a later read proves it failed."
+            ),
+        }
+    return {
+        "ok": True,
+        "action": fn_type,
+        "message": "API call completed successfully.",
+    }
+
+
+def _harness_block_payload(*, reason: str, message: str, suggested_next: str) -> dict[str, Any]:
+    return {
+        "harness_blocked": True,
+        "reason": reason,
+        "message": message,
+        "suggested_next": suggested_next,
+    }
+
+
+def _collect_write_arg_refs(fn_type: str, args: dict[str, Any], write_refs: list[str] | None) -> None:
+    for ref in _write_arg_ref_tokens(fn_type, args):
+        _remember_ref(write_refs, ref)
+
+
+def _write_arg_ref_tokens(fn_type: str, args: dict[str, Any]) -> list[str]:
+    arg_refs = {
+        "equipment_update": (("equipment", "floc"),),
+        "employee_update": (("employee", "emp_id"),),
+        "material_reorder": (("material", "mat_id"),),
+        "notif_create": (("equipment", "floc"),),
+        "notif_update": (("notification", "notif_id"),),
+        "wo_create": (("notification", "notification_id"),),
+        "wo_update": (("work_order", "wo_id"), ("equipment", "floc")),
+        "operation_add": (("work_order", "workorder_id"),),
+        "operation_update": (("work_order", "workorder_id"), ("operation", "op_id")),
+    }
+    refs: list[str] = []
+    for ref_type, arg_name in arg_refs.get(fn_type, ()):
+        ref_id = args.get(arg_name)
+        if ref_id is not None:
+            refs.append(f"{ref_type}:{ref_id}")
+    if fn_type in {"operation_add", "operation_update"}:
+        for material in args.get("materials") or []:
+            if isinstance(material, dict) and material.get("mat_id") is not None:
+                refs.append(f"material:{material['mat_id']}")
+    return refs
+
+
+def _collect_entity_refs(result_payload: Any, target_refs: list[str] | None) -> None:
     if not isinstance(result_payload, dict):
         return
-
-    def remember(target: list[str] | None, value: str) -> None:
-        if target is not None and value not in target:
-            target.append(value)
 
     entity_keys = {
         "equipment": "equipment",
@@ -231,7 +419,7 @@ def _collect_entity_refs(result_payload: Any, read_refs: list[str] | None, write
         if isinstance(value, dict):
             ref_id = value.get("id") or value.get("floc")
             if ref_id is not None:
-                remember(write_refs if key in {"notification", "work_order", "operation"} else read_refs, f"{ref_type}:{ref_id}")
+                _remember_ref(target_refs, f"{ref_type}:{ref_id}")
     for key, ref_type in collection_keys.items():
         values = result_payload.get(key)
         if isinstance(values, list):
@@ -239,11 +427,251 @@ def _collect_entity_refs(result_payload: Any, read_refs: list[str] | None, write
                 if isinstance(value, dict):
                     ref_id = value.get("id") or value.get("floc")
                     if ref_id is not None:
-                        remember(read_refs, f"{ref_type}:{ref_id}")
+                        _remember_ref(target_refs, f"{ref_type}:{ref_id}")
+
+
+def _extract_collection_candidates(result_payload: Any) -> dict[str, list[dict[str, str]]]:
+    if not isinstance(result_payload, dict):
+        return {}
+    collection_keys = {
+        "equipments": "equipment",
+        "employees": "employee",
+        "materials": "material",
+        "notifications": "notification",
+        "work_orders": "work_order",
+        "operations": "operation",
+    }
+    candidates_by_type: dict[str, list[dict[str, str]]] = {}
+    for key, entity_type in collection_keys.items():
+        values = result_payload.get(key)
+        if not isinstance(values, list):
+            continue
+        candidates = []
+        for value in values:
+            candidate = _candidate_summary(value)
+            if candidate is not None:
+                candidates.append(candidate)
+        if candidates:
+            candidates_by_type[entity_type] = candidates
+    return candidates_by_type
+
+
+def _candidate_summary(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    ref_id = value.get("id") or value.get("floc")
+    if ref_id is None:
+        return None
+    label = (
+        value.get("short_desc")
+        or value.get("description")
+        or value.get("name")
+        or value.get("status")
+        or ""
+    )
+    return {
+        "id": str(ref_id),
+        "label": str(label)[:120],
+    }
+
+
+TASK_SCOPE_MULTI_CUES = {
+    "all",
+    "list",
+    "total",
+    "count",
+    "capacity",
+    "remaining",
+    "every",
+    "open",
+    "notifications",
+    "materials",
+    "workorders",
+    "orders",
+}
+TASK_TOKEN_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "this",
+    "that",
+    "from",
+    "have",
+    "has",
+    "been",
+    "please",
+    "what",
+    "when",
+    "where",
+    "which",
+    "all",
+    "list",
+    "open",
+    "work",
+    "order",
+    "orders",
+    "workorder",
+    "workorders",
+    "notification",
+    "notifications",
+    "equipment",
+    "material",
+    "materials",
+    "valve",
+    "pipeline",
+    "separator",
+    "replace",
+    "replacement",
+    "planned",
+    "repair",
+    "candidate",
+    "system",
+    "team",
+    "week",
+}
+
+
+def _classify_task_scope(task_text: str) -> str:
+    tokens = set(_text_tokens(task_text))
+    if tokens & TASK_SCOPE_MULTI_CUES:
+        return "multi_result"
+    if any(phrase in task_text.lower() for phrase in ("remaining capacity", "how many", "how much")):
+        return "multi_result"
+    return "single_target"
+
+
+def _task_distinctive_tokens(task_text: str) -> list[str]:
+    return [
+        token
+        for token in _text_tokens(task_text)
+        if token not in TASK_TOKEN_STOPWORDS and (len(token) >= 4 or any(ch.isdigit() for ch in token))
+    ]
+
+
+def _text_tokens(text: str) -> list[str]:
+    return [
+        token.strip("-_")
+        for token in re.findall(r"[a-zA-Z0-9]+(?:[-_][a-zA-Z0-9]+)*", text.lower())
+        if token.strip("-_")
+    ]
+
+
+def _resolve_candidates_by_task_tokens(task_tokens: list[str], candidates: list[dict[str, str]]) -> str | None:
+    if not task_tokens:
+        return None
+    token_set = set(task_tokens)
+    best_id: str | None = None
+    best_score = 0
+    tied = False
+    for candidate in candidates:
+        candidate_text = f"{candidate.get('id', '')} {candidate.get('label', '')}".lower()
+        candidate_tokens = set(_text_tokens(candidate_text))
+        score = len(token_set & candidate_tokens)
+        for token in token_set:
+            if token and token in candidate_text:
+                score += 2 if any(ch.isdigit() for ch in token) else 1
+        if score > best_score:
+            best_id = candidate.get("id")
+            best_score = score
+            tied = False
+        elif score == best_score and score > 0:
+            tied = True
+    if best_id is not None and best_score >= 2 and not tied:
+        return best_id
+    return None
+
+
+def _compact_query_args(args: dict[str, Any], *, limit: int = 120) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in args.items():
+        if key == "type":
+            continue
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, str):
+            compact[key] = value[:limit]
+        elif isinstance(value, (int, float, bool)):
+            compact[key] = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+            compact[key] = text[:limit]
+    return compact
+
+
+def _remember_ref(target: list[str] | None, value: str) -> None:
+    if target is not None and value not in target:
+        target.append(value)
+
+
+def _ground_ref_key(ref: Any) -> tuple[str, str] | None:
+    ref_type = getattr(ref, "type", None)
+    ref_id = getattr(ref, "id", None)
+    if not isinstance(ref_type, str) or not isinstance(ref_id, str):
+        return None
+    if ref_type not in GROUND_REF_TYPES or not _looks_like_ref_id(ref_id):
+        return None
+    return ref_type, ref_id
+
+
+def _looks_like_ref_id(value: str) -> bool:
+    clean = value.strip()
+    if not clean or len(clean) > 180:
+        return False
+    return not any(ch in clean for ch in "{}[]\n\r\t")
+
+
+def _token_to_ground_ref(token: str) -> GroundRef | None:
+    ref_type, sep, ref_id = token.partition(":")
+    if sep != ":":
+        return None
+    if ref_type not in GROUND_REF_TYPES or not _looks_like_ref_id(ref_id):
+        return None
+    return GroundRef(type=ref_type, id=ref_id)
+
+
+def _ground_refs_from_tokens(tokens: list[str]) -> list[GroundRef]:
+    refs: list[GroundRef] = []
+    seen: set[tuple[str, str]] = set()
+    for token in tokens:
+        ref = _token_to_ground_ref(token)
+        if ref is None:
+            continue
+        key = (ref.type, ref.id)
+        if key in seen:
+            continue
+        refs.append(ref)
+        seen.add(key)
+    return refs
+
+
+def _augment_respond_refs(fn: Req_Respond, harness_state: HarnessState) -> int:
+    existing: list[GroundRef] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in fn.ground_refs or []:
+        key = _ground_ref_key(ref)
+        if key is None or key in seen:
+            continue
+        existing.append(ref)
+        seen.add(key)
+
+    added = 0
+    for token in [*(harness_state.write_refs or []), *(harness_state.read_refs or []), *(harness_state.support_refs or [])]:
+        ref = _token_to_ground_ref(token)
+        if ref is None:
+            continue
+        key = (ref.type, ref.id)
+        if key in seen:
+            continue
+        existing.append(ref)
+        seen.add(key)
+        added += 1
+
+    fn.ground_refs = existing
+    return added
 
 
 Action = Union[
-    Req_System,
     Req_EquipmentList, Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
     Req_EmployeeList, Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
     Req_MaterialList, Req_MaterialGet, Req_MaterialSearch, Req_MaterialReorder,
@@ -300,7 +728,7 @@ class NextStepDiscriminated(BaseModel):
         default_factory=list,
         description="Short evidence checks completed or still required before writes/respond.",
     )
-    plan: List[str]= Field(
+    plan: Annotated[List[str], MinLen(1), MaxLen(5)] = Field(
         ..., description="Remaining 3 steps to complete the task (most important first)"
     )
     ready_to_respond: bool = Field(
@@ -320,6 +748,29 @@ def _response_model_for_provider(provider: str) -> type[BaseModel]:
     return NextStep if provider == "openai" else NextStepDiscriminated
 
 
+def _first_plan_item(plan: Any) -> str:
+    if isinstance(plan, list) and plan and isinstance(plan[0], str) and plan[0].strip():
+        return plan[0]
+    return "No plan provided."
+
+
+def _explicitly_requests_material_reorder(task_text: str) -> bool:
+    text = task_text.lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "reorder",
+            "re-order",
+            "restock",
+            "re-stock",
+            "order material",
+            "order spare",
+            "procure",
+            "raise purchase",
+        )
+    )
+
+
 def _to_responses_input(log: list[dict]) -> list[dict]:
     """Convert internal chat-style log into Responses API input messages."""
     items: list[dict] = []
@@ -336,41 +787,14 @@ def _to_responses_input(log: list[dict]) -> list[dict]:
     return items
 
 
-SYSTEM_PROMPT = """\
-You are a maintenance operations agent on NOVA-7, a gas production platform.
-You interact with the platform's maintenance management system through API calls.
+RUNTIME_PROMPT_PATH = Path(__file__).with_name("ARC_agents.md")
 
-Your workflow:
-1. Start with system to learn your role and today's date.
-2. Read relevant wiki documents to understand policies and SOPs before acting.
-3. Investigate the situation using search/get/list endpoints.
-4. Take action if your role permits it - or refuse if policy forbids it.
-5. Call respond with a clear summary, the correct outcome code, and entity ground refs.
 
-Outcome codes:
-- ok_answer              - task completed, clear answer given
-- ok_not_found           - requested information doesn't exist
-- denied_security        - your role or policy doesn't permit the action
-- none_clarification_needed - task is ambiguous, need more info
-- none_unsupported       - can't do this with available tools
-- error_internal         - unexpected error
+def _load_runtime_prompt() -> str:
+    return RUNTIME_PROMPT_PATH.read_text(encoding="utf-8").strip()
 
-Always check your authority in raci.md before performing write actions.
-Always consult RAM.md and incidents.md before assigning risk assessments.
-Include ground_refs to entities you referenced or acted on in your respond call.
 
-Minimal operating harness:
-- Keep current_state as a compact task ledger: task type, known facts, open questions, and last action result.
-- Classify the task before acting: LOOKUP/ANSWER means answer only and perform no writes; WRITE means the user explicitly asked to create, update, close, reorder, reschedule, or modify a specific object.
-- Treat every write as gated. Before creating or updating notifications, work orders, operations, equipment, employees, materials, or wiki pages, verify role authority in governance/raci.md and confirm the requested target is unambiguous.
-- After any successful write/update/create/close/reorder API call, do not repeat that write. If the side effect completed, either respond or perform only a read needed to verify the final answer.
-- For risk, priority, safety, incident, or maintenance-plan decisions, consult RAM.md, incidents.md, and the relevant SOP/wiki page before acting.
-- If a lookup returns zero or multiple plausible targets after reasonable search, do not guess. Use API data and policy docs to decide between ok_not_found and none_clarification_needed.
-- If policy or role authority forbids the requested action, respond denied_security and explain the specific policy reason.
-- If the requested operation has no available API/tool or documented system capability, respond none_unsupported, not denied_security.
-- Before respond, verify that all required side effects succeeded, the outcome code matches the real result, and ground_refs include every entity read, created, or changed that supports the answer.
-- Do not rely on benchmark-specific shortcuts or memorized task patterns. Derive each decision from the task text, loaded policy/wiki content, API schemas, and API results available in the current run.
-"""
+SYSTEM_PROMPT = _load_runtime_prompt()
 
 MAX_STEPS = 30
 COMMON_WIKI_DOCS = (
@@ -414,8 +838,17 @@ def run_agent(
     log.append({"role": "user", "content": task.task_text})
 
     response_model = _response_model_for_provider(llm_config.provider)
-    harness_state = HarnessState()
+    harness_state = HarnessState(
+        task_scope=_classify_task_scope(task.task_text),
+        task_tokens=_task_distinctive_tokens(task.task_text),
+    )
     successful_write_signatures: set[str] = set()
+    seen_nonwrite_signatures: dict[str, int] = {}
+    ready_read_count = 0
+    last_failed_write: dict[str, Any] | None = None
+    failed_write_response_nudges = 0
+    consecutive_blocked_steps = 0
+    force_respond_mode = False
 
     for i in range(MAX_STEPS):
         step_id = f"step_{i + 1}"
@@ -468,7 +901,12 @@ def run_agent(
 
         fn = step.function
         fn_type = fn.type
+        if isinstance(fn, Req_Respond):
+            added_refs = _augment_respond_refs(fn, harness_state)
+        else:
+            added_refs = 0
         fn_args = fn.model_dump_json(exclude_none=True, exclude={"type"})
+        plan_text = _first_plan_item(step.plan)
         step_event.update({
             "task_type": step.task_type,
             "current_state": step.current_state,
@@ -480,13 +918,15 @@ def run_agent(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
         })
-        print(f"{CLI_CYAN}{fn_type}{CLI_CLR} - {step.plan[0]}  ({elapsed_ms}ms)")
+        if added_refs:
+            step_event["harness_ref_augmented"] = added_refs
+        print(f"{CLI_CYAN}{fn_type}{CLI_CLR} - {plan_text}  ({elapsed_ms}ms)")
         print(f"    {CLI_YELLOW}args:{CLI_CLR} {fn_args[:300]}")
 
         try:
             api.log_llm(
                 task_id=task.task_id,
-                completion=step.plan[0],
+                completion=plan_text,
                 model=llm_config.model,
                 duration_sec=(time.time() - t0),
                 prompt_tokens=prompt_tokens,
@@ -497,7 +937,7 @@ def run_agent(
 
         log.append({
             "role": "assistant",
-            "content": step.plan[0],
+            "content": plan_text,
             "tool_calls": [{
                 "type": "function",
                 "id": step_id,
@@ -510,7 +950,121 @@ def run_agent(
 
         result_payload: Any
         action_signature = _action_signature(fn)
-        if fn_type in WRITE_ACTION_TYPES and action_signature in successful_write_signatures:
+        harness_block: dict[str, Any] | None = None
+        if force_respond_mode and not isinstance(fn, Req_Respond):
+            harness_block = _harness_block_payload(
+                reason="force_respond_after_successful_write",
+                message=(
+                    "A write already completed successfully. Do not perform more reads or writes; "
+                    "call respond now using the completed write refs."
+                ),
+                suggested_next="respond",
+            )
+        elif (
+            isinstance(fn, Req_Respond)
+            and fn.outcome == "ok_answer"
+            and last_failed_write is not None
+            and failed_write_response_nudges < 1
+        ):
+            failed_write_response_nudges += 1
+            harness_block = _harness_block_payload(
+                reason="failed_write_requires_non_ok_response",
+                message=(
+                    f"The requested {last_failed_write.get('type')} write failed with "
+                    f"{last_failed_write.get('error')}. The side effect did not complete. "
+                    "Use a non-OK outcome unless a later successful retry proves completion."
+                ),
+                suggested_next="non_ok_respond_or_successful_retry",
+            )
+        elif isinstance(fn, Req_Respond) and harness_state.should_nudge_ambiguity(fn):
+            ambiguity = harness_state.unresolved_ambiguities()[0]
+            harness_state.record_ambiguity_nudge()
+            harness_block = _harness_block_payload(
+                reason="ambiguity_pre_respond_nudge",
+                message=(
+                    "Unresolved candidate ambiguity remains for "
+                    f"{ambiguity.get('entity_type')} candidates "
+                    f"{ambiguity.get('candidate_ids')}. "
+                    "Respond with none_clarification_needed, or answer only if current evidence "
+                    "clearly disambiguates the intended candidate."
+                ),
+                suggested_next="clarify_or_justify_disambiguation",
+            )
+        elif fn_type == "system" and harness_state.steps_taken >= 1:
+            harness_block = _harness_block_payload(
+                reason="repeated_system_nonprogress",
+                message=(
+                    "System context is already available. Execute the planned search, read, "
+                    "write, or respond instead of repeating system."
+                ),
+                suggested_next="search_or_respond",
+            )
+        elif (
+            fn_type == "material_reorder"
+            and not _explicitly_requests_material_reorder(task.task_text)
+        ):
+            harness_block = _harness_block_payload(
+                reason="compensating_material_reorder_blocked",
+                message=(
+                    "The user did not explicitly request material reorder/restock. "
+                    "Do not perform a compensating reorder just to make another write possible; "
+                    "respond with the blocking stock issue or perform only the requested write if valid."
+                ),
+                suggested_next="respond_or_requested_write",
+            )
+        elif step.ready_to_respond and fn_type in WRITE_ACTION_TYPES:
+            harness_block = _harness_block_payload(
+                reason="ready_to_respond_blocks_write",
+                message=(
+                    "You marked ready_to_respond=true, so do not perform another write. "
+                    "Call respond, or use at most one read/search only if final verification is needed."
+                ),
+                suggested_next="respond",
+            )
+        elif (
+            last_failed_write is not None
+            and fn_type in WRITE_ACTION_TYPES
+            and fn_type != last_failed_write["type"]
+        ):
+            harness_block = _harness_block_payload(
+                reason="failed_write_blocks_different_write",
+                message=(
+                    f"The previous {last_failed_write['type']} write failed. "
+                    "Do not repair a failed write by performing a different write. "
+                    "Inspect the failure, retry the same intended write if corrected, or respond."
+                ),
+                suggested_next="read_retry_same_write_or_respond",
+            )
+        elif step.ready_to_respond and not isinstance(fn, Req_Respond):
+            if ready_read_count >= 1:
+                harness_block = _harness_block_payload(
+                    reason="ready_to_respond_read_limit",
+                    message=(
+                        "You already used one read/search after marking ready_to_respond=true. "
+                        "Call respond with outcome, message, and inclusive ground_refs."
+                    ),
+                    suggested_next="respond",
+                )
+        elif fn_type not in WRITE_ACTION_TYPES and fn_type != "respond":
+            repeat_count = seen_nonwrite_signatures.get(action_signature, 0)
+            if repeat_count >= 2:
+                harness_block = _harness_block_payload(
+                    reason="repeated_nonwrite_nonprogress",
+                    message=(
+                        "This exact read/search action has already been tried twice. "
+                        "Use the available result, try a different query/read, or respond."
+                    ),
+                    suggested_next="different_action_or_respond",
+                )
+
+        if harness_block is not None:
+            result_payload = harness_block
+            result_text = json.dumps(result_payload, ensure_ascii=False)
+            print(f"    {CLI_YELLOW}BLOCKED {harness_block['reason']}{CLI_CLR}")
+            step_event["result"] = result_payload
+            step_event["harness_block"] = harness_block["reason"]
+            consecutive_blocked_steps += 1
+        elif fn_type in WRITE_ACTION_TYPES and action_signature in successful_write_signatures:
             result_payload = {
                 "duplicate_successful_write_blocked": True,
                 "action": fn_type,
@@ -522,7 +1076,9 @@ def run_agent(
             result_text = json.dumps(result_payload, ensure_ascii=False)
             print(f"    {CLI_YELLOW}BLOCKED duplicate write{CLI_CLR}")
             step_event["result"] = result_payload
+            consecutive_blocked_steps += 1
         else:
+            consecutive_blocked_steps = 0
             try:
                 result = _api_retry(
                     f"maintenance API call {fn_type}",
@@ -532,18 +1088,9 @@ def run_agent(
                 if result_payload:
                     result_text = result.model_dump_json(exclude_none=True)
                 else:
-                    result_text = json.dumps(
-                        {
-                            "ok": True,
-                            "action": fn_type,
-                            "message": (
-                                "The API call completed successfully. "
-                                "Do not repeat this write unless a later read proves it failed."
-                            ),
-                        }
-                    )
+                    result_text = json.dumps(_success_payload(fn_type))
                     result_payload = json.loads(result_text)
-                if fn_type in WRITE_ACTION_TYPES:
+                if _is_write_success(fn_type, result_payload):
                     successful_write_signatures.add(action_signature)
                 print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
                 step_event["result"] = result_payload
@@ -562,23 +1109,103 @@ def run_agent(
                 print(f"    {CLI_RED}ERR: {exc}{CLI_CLR}")
                 step_event["error"] = str(exc)
 
+        if fn_type not in WRITE_ACTION_TYPES and fn_type != "respond":
+            seen_nonwrite_signatures[action_signature] = seen_nonwrite_signatures.get(action_signature, 0) + 1
+            if step.ready_to_respond and harness_block is None:
+                ready_read_count += 1
+
+        if fn_type in WRITE_ACTION_TYPES:
+            if _is_write_success(fn_type, result_payload):
+                last_failed_write = None
+                failed_write_response_nudges = 0
+            elif harness_block is None and isinstance(result_payload, dict) and result_payload.get("error"):
+                write_args = fn.model_dump(exclude_none=True, exclude={"type"}) if hasattr(fn, "model_dump") else {}
+                support_refs = _write_arg_ref_tokens(fn_type, write_args)
+                harness_state.remember_support_refs(support_refs)
+                last_failed_write = {
+                    "type": fn_type,
+                    "signature": action_signature,
+                    "args": write_args,
+                    "error": result_payload.get("error") or result_payload.get("code"),
+                    "code": result_payload.get("code"),
+                    "support_refs": support_refs,
+                }
+
         log.append({"role": "tool", "content": result_text, "tool_call_id": step_id})
         harness_state.update_from_step(step=step, fn=fn, result_payload=result_payload)
         step_event["harness_state"] = {
             "task_type": harness_state.task_type,
+            "task_scope": harness_state.task_scope,
             "writes_completed": harness_state.writes_completed,
             "read_refs": harness_state.read_refs[-12:],
             "write_refs": harness_state.write_refs[-12:],
+            "support_refs": harness_state.support_refs[-8:],
+            "candidate_ledger": harness_state.candidate_ledger[-4:],
+            "open_ambiguities": harness_state.open_ambiguities[-4:],
+            "ambiguity_nudges": harness_state.ambiguity_nudges,
         }
         if run_logger:
             run_logger.record_step(**step_event)
 
-        if isinstance(fn, Req_Respond):
+        if isinstance(fn, Req_Respond) and not (
+            isinstance(result_payload, dict) and result_payload.get("harness_blocked")
+        ):
             print(f"\n  {CLI_GREEN}Agent responded: {fn.outcome}{CLI_CLR}")
             print(f"  {CLI_BLUE}{fn.message}{CLI_CLR}")
             if fn.ground_refs:
                 for ref in fn.ground_refs:
                     print(f"    ref: {ref.type} -> {ref.id}")
+            break
+
+        if consecutive_blocked_steps >= 3:
+            if harness_state.writes_completed > 0 and not force_respond_mode:
+                force_respond_mode = True
+                consecutive_blocked_steps = 0
+                print(f"\n  {CLI_YELLOW}Entering force-respond mode after successful write.{CLI_CLR}")
+                continue
+            auto_outcome = "ok_answer" if harness_state.writes_completed > 0 else "error_internal"
+            auto_message = (
+                "The requested write appears to have completed, but the run repeatedly selected "
+                "blocked or non-progress actions after completion."
+                if auto_outcome == "ok_answer"
+                else "I could not complete the task because the run repeatedly selected "
+                "blocked or non-progress actions."
+            )
+            auto_fn = Req_Respond(
+                message=auto_message,
+                outcome=auto_outcome,
+                ground_refs=_ground_refs_from_tokens(harness_state.write_refs or []),
+            )
+            try:
+                _api_retry(
+                    "auto respond after blocked non-progress",
+                    lambda: maint.dispatch(auto_fn),
+                )
+                print(f"\n  {CLI_YELLOW}Auto-responded after repeated blocked non-progress.{CLI_CLR}")
+                if run_logger:
+                    run_logger.record_step(
+                        step=i + 1,
+                        event="auto_respond_after_blocked_nonprogress",
+                        function_type="respond",
+                        function_args=auto_fn.model_dump(exclude_none=True, exclude={"type"}),
+                        result=_success_payload("respond"),
+                        harness_state={
+                            "task_type": harness_state.task_type,
+                            "task_scope": harness_state.task_scope,
+                            "writes_completed": harness_state.writes_completed,
+                            "read_refs": harness_state.read_refs[-12:],
+                            "write_refs": harness_state.write_refs[-12:],
+                            "support_refs": harness_state.support_refs[-8:],
+                        },
+                    )
+            except Exception as exc:
+                print(f"\n  {CLI_RED}Auto-response failed: {exc}{CLI_CLR}")
+                if run_logger:
+                    run_logger.record_step(
+                        step=i + 1,
+                        event="auto_respond_after_blocked_nonprogress_failed",
+                        error=str(exc),
+                    )
             break
     else:
         print(f"\n  {CLI_YELLOW}Reached max steps ({MAX_STEPS}) without responding.{CLI_CLR}")

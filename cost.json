@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "updated_at": "2026-05-18",
+  "updated_at": "2026-05-22",
   "currency": "USD",
   "unit": "1M tokens",
   "sources": {
@@ -42,6 +42,11 @@
       "output_per_1m": 180.0
     },
     "openai/gpt-5.3": {
+      "input_per_1m": 1.75,
+      "cached_input_per_1m": 0.175,
+      "output_per_1m": 14.0
+    },
+    "openai/gpt-5.3-codex": {
       "input_per_1m": 1.75,
       "cached_input_per_1m": 0.175,
       "output_per_1m": 14.0
@@ -108,7 +113,7 @@
         "gpt-5.4": "openai/gpt-5.4",
         "gpt-5.4-mini": "openai/gpt-5.4-mini",
         "gpt-5.4-nano": "openai/gpt-5.4-nano",
-        "gpt-5.3-codex": "openai/gpt-5.3",
+        "gpt-5.3-codex": "openai/gpt-5.3-codex",
         "gpt-5.3-chat-latest": "openai/gpt-5.3",
         "gpt-4.1": "openai/gpt-4.1",
         "gpt-4.1-mini": "openai/gpt-4.1-mini",
@@ -122,7 +127,7 @@
         "openai/gpt-5.4": "openai/gpt-5.4",
         "openai/gpt-5.4-mini": "openai/gpt-5.4-mini",
         "openai/gpt-5.4-nano": "openai/gpt-5.4-nano",
-        "openai/gpt-5.3-codex": "openai/gpt-5.3",
+        "openai/gpt-5.3-codex": "openai/gpt-5.3-codex",
         "openai/gpt-5.3-chat": "openai/gpt-5.3",
         "openai/gpt-4.1": "openai/gpt-4.1",
         "openai/gpt-4.1-mini": "openai/gpt-4.1-mini",

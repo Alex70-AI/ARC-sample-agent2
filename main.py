@@ -31,11 +31,12 @@ load_dotenv()
 from ogchallenge_client import CoreClient, ApiException
 
 from agent import LLMConfig, make_llm_client, run_agent
-from harness import RunLogger, load_harness_version
+from run_logging import RunLogger, load_harness_version
 
 DEFAULT_ARC_BASE_URL = "https://agentreliabilitychallenge.com"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL_ID = "gpt-4.1-2025-04-14"
+DEFAULT_MODEL_ID = "gpt-4.1-mini"
+DEFAULT_ARC_AGENT_NAME = "ARC_Agent_70"
 
 CLI_RED = "\x1b[31m"
 CLI_GREEN = "\x1b[32m"
@@ -215,7 +216,8 @@ def run_session(
         lambda: api.start_session(
             benchmark="maintenance-ops",
             workspace=workspace,
-            name=f"sample-agent ({llm_config.model})",
+            name=os.getenv("ARC_AGENT_NAME", DEFAULT_ARC_AGENT_NAME).strip()
+            or DEFAULT_ARC_AGENT_NAME,
             architecture=f"{llm_config.provider} structured-output agent",
         ),
     )
@@ -350,6 +352,7 @@ def main() -> None:
         run_logger = RunLogger(
             mode="task" if args.spec else "batch",
             root=args.log_root,
+            model=os.getenv("MODEL_ID", DEFAULT_MODEL_ID).strip(),
         )
         print(f"Local run log: {run_logger.path}")
 
