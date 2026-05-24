@@ -7,10 +7,15 @@ compared without changing the ARC platform interaction model.
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re
 from typing import Any
+
+MAX_EVIDENCE_DOC_CHARS = 25_000
+MAX_EVIDENCE_SEARCH_CHARS = 25_000
+MAX_EVIDENCE_WRITE_CHARS = 25_000
 
 WRITE_ACTION_TYPES = {
     "equipment_update",
@@ -52,7 +57,7 @@ class RunLogger:
         self.cost_table = _load_cost_table(Path(cost_path))
         self.harness_version = load_harness_version(version_path)
         self.data: dict[str, Any] = {
-            "log_schema_version": 3,
+            "log_schema_version": 4,
             "mode": mode,
             "harness_version": self.harness_version,
             "started_at": self.started_at.isoformat(timespec="seconds"),
@@ -60,6 +65,11 @@ class RunLogger:
             "status": "running",
             "metadata": {},
             "bootstrap_manifest": {},
+            "evidence": {
+                "wiki_docs": {},
+                "wiki_searches": {},
+                "wiki_writes": {},
+            },
             "usage": _empty_usage(),
             "session": {},
             "tasks": [],
@@ -118,10 +128,19 @@ class RunLogger:
             task["bootstrap"].append(entry)
         else:
             _merge_bootstrap_manifest(self.data["bootstrap_manifest"], entry)
+            if label.startswith("wiki_load:"):
+                _store_wiki_doc(
+                    self.data["evidence"],
+                    path=label.removeprefix("wiki_load:"),
+                    content=text,
+                )
         self.flush()
 
     def record_step(self, **step: Any) -> None:
         task = self._require_task()
+        evidence_refs = _record_step_evidence(self.data["evidence"], step)
+        if evidence_refs:
+            step["_evidence_refs"] = evidence_refs
         step = _jsonable(step)
         step_usage = _step_usage(
             step,
@@ -264,6 +283,139 @@ def _merge_bootstrap_manifest(manifest: dict[str, Any], entry: dict[str, Any]) -
     target["seen_count"] = int(target.get("seen_count") or 0) + 1
 
 
+def _record_step_evidence(evidence: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    fn_type = step.get("function_type")
+    step_key = str(step.get("step_id") or step.get("step") or "step")
+    args = step.get("function_args") if isinstance(step.get("function_args"), dict) else {}
+    result = step.get("result") if isinstance(step.get("result"), dict) else {}
+    refs: dict[str, Any] = {}
+
+    path = _wiki_path(args, result)
+    content = result.get("content") if isinstance(result.get("content"), str) else None
+    if path and content and fn_type in {"wiki_load", "wiki_search"}:
+        refs["wiki_doc"] = _store_wiki_doc(evidence, path=path, content=content)
+
+    if fn_type == "wiki_search" and result:
+        refs["wiki_search"] = _store_wiki_search(
+            evidence,
+            step_key=step_key,
+            args=args,
+            result=result,
+        )
+
+    if fn_type in {"wiki_update", "wiki_section_insert"}:
+        write_payload = _wiki_write_payload(step_key=step_key, fn_type=str(fn_type), args=args, step=step)
+        if write_payload:
+            refs["wiki_write"] = _store_wiki_write(evidence, step_key=step_key, payload=write_payload)
+
+    return refs
+
+
+def _wiki_path(args: dict[str, Any], result: dict[str, Any]) -> str | None:
+    path = result.get("path") or args.get("path")
+    return str(path) if path else None
+
+
+def _sha1_text(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _store_wiki_doc(evidence: dict[str, Any], *, path: str, content: str) -> dict[str, Any]:
+    docs = evidence.setdefault("wiki_docs", {})
+    sha1 = _sha1_text(content)
+    existing = docs.get(path)
+    key = path if not isinstance(existing, dict) or existing.get("sha1") == sha1 else f"{path}@{sha1[:10]}"
+    if key not in docs:
+        docs[key] = {
+            "path": path,
+            "chars": len(content),
+            "sha1": sha1,
+            **_content_field(content, MAX_EVIDENCE_DOC_CHARS),
+        }
+    return {"key": key, "chars": len(content), "sha1": sha1}
+
+
+def _store_wiki_search(
+    evidence: dict[str, Any],
+    *,
+    step_key: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    searches = evidence.setdefault("wiki_searches", {})
+    key = step_key
+    if key not in searches:
+        result_text = json.dumps(result, ensure_ascii=False, default=str, separators=(",", ":"))
+        searches[key] = {
+            "args": _compact_value(args),
+            "chars": len(result_text),
+            "sha1": _sha1_text(result_text),
+            **_content_field(result_text, MAX_EVIDENCE_SEARCH_CHARS),
+        }
+    return {"key": key, "chars": searches[key]["chars"], "sha1": searches[key]["sha1"]}
+
+
+def _wiki_write_payload(
+    *,
+    step_key: str,
+    fn_type: str,
+    args: dict[str, Any],
+    step: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "step": step_key,
+        "fn": fn_type,
+    }
+    for key in ("path", "start_row", "end_row", "section_heading", "updated_by"):
+        if args.get(key) not in (None, "", [], {}):
+            payload[key] = args[key]
+    if isinstance(args.get("content"), str):
+        payload["content"] = args["content"]
+        payload["content_chars"] = len(args["content"])
+    if isinstance(args.get("insert_text"), str):
+        payload["insert_text"] = args["insert_text"]
+        payload["insert_text_chars"] = len(args["insert_text"])
+
+    wiki_update_args = step.get("wiki_update_args")
+    if isinstance(wiki_update_args, dict):
+        for key in (
+            "path",
+            "start_row",
+            "end_row",
+            "content_chars",
+            "before_slice",
+            "inserted_or_updated",
+            "after_slice",
+        ):
+            if wiki_update_args.get(key) not in (None, "", [], {}):
+                payload[key] = wiki_update_args[key]
+
+    return payload
+
+
+def _store_wiki_write(evidence: dict[str, Any], *, step_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    writes = evidence.setdefault("wiki_writes", {})
+    key = step_key
+    if key not in writes:
+        stored = dict(payload)
+        for field in ("content", "insert_text", "before_slice", "inserted_or_updated", "after_slice"):
+            value = stored.get(field)
+            if isinstance(value, str):
+                stored[field] = _truncate(value, MAX_EVIDENCE_WRITE_CHARS)
+        writes[key] = stored
+    return {"key": key, "path": payload.get("path")}
+
+
+def _content_field(content: str, limit: int) -> dict[str, Any]:
+    if len(content) <= limit:
+        return {"content": content}
+    return {
+        "content": content[:limit],
+        "truncated": True,
+        "truncated_chars": len(content) - limit,
+    }
+
+
 def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
     fn_type = step.get("function_type")
     compact: dict[str, Any] = {
@@ -288,6 +440,12 @@ def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
     function_args = step.get("function_args")
     if fn_type == "respond" and isinstance(function_args, dict) and function_args.get("outcome"):
         compact["outcome"] = function_args.get("outcome")
+    oss_parse = _compact_oss_parse(step)
+    if oss_parse:
+        compact["oss_parse"] = oss_parse
+    respond_trace = step.get("respond_trace")
+    if isinstance(respond_trace, dict):
+        compact["respond_trace"] = _compact_respond_trace(respond_trace)
     if step.get("task_type") and step.get("task_type") != "unknown":
         compact["task_type"] = step.get("task_type")
     plan = step.get("plan")
@@ -306,6 +464,10 @@ def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
         compact["error"] = _truncate(str(step["error"]), 400)
     elif step.get("result"):
         compact["result"] = _compact_result(step["result"])
+    evidence_refs = step.get("_evidence_refs")
+    if isinstance(evidence_refs, dict) and evidence_refs:
+        compact["evidence"] = evidence_refs
+        _merge_result_evidence(compact, evidence_refs)
     harness_state = step.get("harness_state")
     if isinstance(harness_state, dict):
         refs = {}
@@ -340,6 +502,85 @@ def _compact_step(step: dict[str, Any]) -> dict[str, Any]:
         if harness_state.get("ambiguity_nudges"):
             compact["ambiguity_nudges"] = harness_state["ambiguity_nudges"]
     return {k: v for k, v in compact.items() if v not in (None, {}, [], "")}
+
+
+def _compact_oss_parse(step: dict[str, Any]) -> dict[str, Any]:
+    if not (
+        step.get("event") == "oss_parse_failure_fallback"
+        or step.get("parse_error_category")
+        or step.get("oss_repair_attempted")
+    ):
+        return {}
+
+    payload: dict[str, Any] = {}
+    mapping = {
+        "event": "event",
+        "parse_error_category": "category",
+        "oss_repair_attempted": "repair_attempted",
+        "oss_repair_succeeded": "repair_succeeded",
+        "repair_error": "repair_error",
+        "finish_reason": "finish",
+        "repair_finish_reason": "repair_finish",
+        "oss_normalized": "normalized",
+        "oss_normalizations": "normalizations",
+    }
+    for source, target in mapping.items():
+        value = step.get(source)
+        if value not in (None, "", [], {}):
+            payload[target] = _truncate(str(value), 500) if source == "repair_error" else value
+
+    if isinstance(step.get("raw_snippet"), str) and step["raw_snippet"]:
+        payload["raw"] = _truncate(step["raw_snippet"], 300)
+    if isinstance(step.get("repair_raw_snippet"), str) and step["repair_raw_snippet"]:
+        payload["repair_raw"] = _truncate(step["repair_raw_snippet"], 300)
+    return payload
+
+
+def _merge_result_evidence(compact: dict[str, Any], evidence_refs: dict[str, Any]) -> None:
+    result = compact.get("result")
+    if not isinstance(result, dict):
+        return
+    wiki_doc = evidence_refs.get("wiki_doc")
+    if isinstance(wiki_doc, dict):
+        result["evidence"] = f"wiki_docs:{wiki_doc.get('key')}"
+        result["chars"] = wiki_doc.get("chars")
+        result["sha1"] = wiki_doc.get("sha1")
+    wiki_search = evidence_refs.get("wiki_search")
+    if isinstance(wiki_search, dict):
+        result["search_evidence"] = f"wiki_searches:{wiki_search.get('key')}"
+    wiki_write = evidence_refs.get("wiki_write")
+    if isinstance(wiki_write, dict):
+        result["write_evidence"] = f"wiki_writes:{wiki_write.get('key')}"
+
+
+def _compact_respond_trace(value: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key in ("model", "augmented", "dispatched"):
+        payload = value.get(key)
+        if isinstance(payload, dict):
+            compact[key] = _compact_respond_payload(payload)
+        elif key in value:
+            compact[key] = payload
+    if value.get("dispatch_blocked"):
+        compact["dispatch_blocked"] = value.get("dispatch_blocked")
+    if value.get("added_refs"):
+        compact["added_refs"] = value.get("added_refs")
+    return compact
+
+
+def _compact_respond_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "message" and isinstance(value, str):
+            compact[key] = _truncate(value, 1000)
+        elif key == "ground_refs" and isinstance(value, list):
+            refs = [_compact_value(item) for item in value[:30]]
+            if len(value) > 30:
+                refs.append({"truncated_items": len(value) - 30})
+            compact[key] = refs
+        else:
+            compact[key] = _compact_value(value)
+    return compact
 
 
 def _compact_ambiguity(value: dict[str, Any]) -> dict[str, Any]:
@@ -404,6 +645,10 @@ def _compact_result(value: Any) -> Any:
     if value.get("ok") is True:
         return {"ok": True, "action": value.get("action")}
     summary: dict[str, Any] = {}
+    if value.get("path"):
+        summary["path"] = value.get("path")
+    if isinstance(value.get("content"), str):
+        summary["content_chars"] = len(value["content"])
     for key in ("found", "total", "next_offset", "status"):
         if key in value:
             summary[key] = value[key]

@@ -1,9 +1,23 @@
 # Harness Versions
 
+## 2.5
+
+- Added OpenRouter gpt-oss schema-alias normalization for known wrapper/action
+  names.
+- Tightened OSS JSON contract examples for `task_type` and `function.type`.
+- Logged compact OSS normalization hints inside parse-failure metadata.
+
+
 ## 2.4
 
-- Restored model id in ARC platform batch session telemetry names as
-  `ARC_AGENT_NAME (MODEL_ID)`.
+- Added run-level wiki evidence storage so full `wiki_load` content is logged
+  once per run and step results reference it by evidence key.
+- Added wiki search and wiki write evidence slots for fuller audit trails
+  without duplicating large payloads inside every step.
+- Added three-stage `respond_trace` logging: model parsed payload, augmented
+  payload, and dispatched payload or harness block reason.
+- Added compact OSS parse-failure metadata with short raw/repair snippets and
+  finish reasons.
 
 ## 2.3
 

@@ -79,16 +79,24 @@ OSS_WIKI_INSERT_MAX_CHARS = 500
 OSS_JSON_CONTRACT = (
     "Return exactly one JSON object. Do not use markdown. Do not include text outside JSON.\n"
     "Required wrapper keys: task_type, current_state, gate_checks, plan, ready_to_respond, task_completed, function.\n"
+    "Allowed task_type values only: lookup, write, review, unknown. Do not use wiki_edit.\n"
     "current_state must be <=600 chars. Each plan and gate_checks item must be <=180 chars.\n"
+    "function must always contain a type field. Use harness action names, not API paths.\n"
+    "Do not use path=\"wiki/search\"; use function.type=\"wiki_search\". Do not use path=\"floc/search\"; use function.type=\"equipment_search\".\n"
     "If finished, use function.type=\"respond\".\n"
-    "For simple wiki section insertions, prefer function.type=\"wiki_section_insert\" instead of emitting full wiki_update.content."
+    "For simple wiki section insertions, prefer function.type=\"wiki_section_insert\" instead of emitting full wiki_update.content. "
+    "wiki_section_insert requires path, section_heading, insert_text, and optional updated_by.\n"
+    "Example lookup: {\"task_type\":\"lookup\",\"current_state\":\"Need to search work orders.\",\"gate_checks\":[],\"plan\":[\"Search work orders.\"],\"ready_to_respond\":false,\"task_completed\":false,\"function\":{\"type\":\"wo_search\",\"short_desc\":\"*temperature transmitter*\",\"floc\":\"WELL-05-*\",\"limit\":10,\"offset\":0}}\n"
+    "Example wiki insert: {\"task_type\":\"write\",\"current_state\":\"Need to insert one safety line into SOP.\",\"gate_checks\":[\"Role permits wiki edit.\"],\"plan\":[\"Insert safety line.\"],\"ready_to_respond\":false,\"task_completed\":false,\"function\":{\"type\":\"wiki_section_insert\",\"path\":\"sop/block-valve-replacement.md\",\"section_heading\":\"Safety Precautions\",\"insert_text\":\"Inform Control Room before work commences.\",\"updated_by\":\"<current user>\"}}"
 )
 OSS_REPAIR_CONTRACT = (
     "Your previous response was invalid for the required JSON schema.\n"
     "Return one complete valid JSON object only. No markdown, no comments, no surrounding text.\n"
     "Use the required wrapper keys: task_type, current_state, gate_checks, plan, ready_to_respond, task_completed, function.\n"
+    "Allowed task_type values only: lookup, write, review, unknown. Convert wiki_edit to write.\n"
+    "function must always contain type. Convert API paths to harness action names: wiki/search -> wiki_search, wiki/load -> wiki_load, wiki/update -> wiki_update, floc/search -> equipment_search.\n"
     "If the task is complete or blocked, use function.type=\"respond\".\n"
-    "Do not emit long document content. For simple wiki section insertions use function.type=\"wiki_section_insert\"."
+    "Do not emit long document content. For simple wiki section insertions use function.type=\"wiki_section_insert\" with insert_text."
 )
 
 
@@ -973,6 +981,108 @@ def _direct_respond_step(payload: dict[str, Any], harness_state: HarnessState) -
         return None
 
 
+OSS_TASK_TYPE_ALIASES = {
+    "wiki_edit": "write",
+    "edit": "write",
+    "update": "write",
+    "answer": "lookup",
+    "search": "lookup",
+}
+OSS_FUNCTION_PATH_ALIASES = {
+    "wiki/search": "wiki_search",
+    "wiki/load": "wiki_load",
+    "wiki/update": "wiki_update",
+    "wiki/tree": "wiki_tree",
+    "floc/search": "equipment_search",
+    "floc/get": "equipment_get",
+    "floc/update": "equipment_update",
+    "equipment/search": "equipment_search",
+    "equipment/get": "equipment_get",
+    "equipment/update": "equipment_update",
+    "workorders/search": "wo_search",
+    "workorders/get": "wo_get",
+    "workorders/update": "wo_update",
+    "workorders/create": "wo_create",
+    "notifications/search": "notif_search",
+    "notifications/get": "notif_get",
+    "notifications/create": "notif_create",
+    "notifications/update": "notif_update",
+    "materials/search": "material_search",
+    "materials/get": "material_get",
+    "materials/reorder": "material_reorder",
+    "operations/list": "operation_list",
+    "operations/add": "operation_add",
+    "operations/update": "operation_update",
+    "employees/search": "employee_search",
+    "employees/get": "employee_get",
+    "employees/update": "employee_update",
+}
+OSS_FUNCTION_TYPE_ALIASES = {
+    "wiki/search": "wiki_search",
+    "wiki/load": "wiki_load",
+    "wiki/update": "wiki_update",
+    "wiki/tree": "wiki_tree",
+    "floc/search": "equipment_search",
+    "floc/get": "equipment_get",
+    "floc/update": "equipment_update",
+}
+
+
+def _normalize_oss_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    normalized = json.loads(json.dumps(payload, ensure_ascii=False))
+    changes: list[str] = []
+
+    task_type = normalized.get("task_type")
+    if isinstance(task_type, str):
+        alias = OSS_TASK_TYPE_ALIASES.get(task_type.strip().lower())
+        if alias:
+            normalized["task_type"] = alias
+            changes.append(f"task_type:{task_type}->{alias}")
+
+    fn = normalized.get("function")
+    if isinstance(fn, dict):
+        fn_type = fn.get("type")
+        if isinstance(fn_type, str):
+            alias = OSS_FUNCTION_TYPE_ALIASES.get(fn_type.strip().lower())
+            if alias:
+                fn["type"] = alias
+                changes.append(f"function.type:{fn_type}->{alias}")
+        if not fn.get("type"):
+            path = fn.get("path")
+            if isinstance(path, str):
+                alias = OSS_FUNCTION_PATH_ALIASES.get(path.strip().lower().strip("/"))
+                if alias:
+                    fn["type"] = alias
+                    changes.append(f"function.path:{path}->{alias}")
+        if fn.get("type") == "wiki_search" and not fn.get("pattern"):
+            query = fn.get("query")
+            if isinstance(query, str) and query.strip():
+                fn["pattern"] = query
+                changes.append("wiki_search.query->pattern")
+        if fn.get("type") == "wiki_search" and isinstance(fn.get("path"), str):
+            path = fn.pop("path")
+            if path.strip().lower().strip("/") not in OSS_FUNCTION_PATH_ALIASES:
+                fn.setdefault("root", path)
+                changes.append("wiki_search.path->root")
+        if fn.get("type") == "wiki_section_insert":
+            for source in ("insert_text", "content", "statement", "text"):
+                value = fn.get(source)
+                if isinstance(value, str) and value.strip():
+                    if source != "insert_text":
+                        fn["insert_text"] = value
+                        changes.append(f"wiki_section_insert.{source}->insert_text")
+                    break
+            for source in ("section_heading", "section", "heading"):
+                value = fn.get(source)
+                if isinstance(value, str) and value.strip():
+                    if source != "section_heading":
+                        fn["section_heading"] = value
+                        changes.append(f"wiki_section_insert.{source}->section_heading")
+                    break
+
+    return normalized, changes
+
+
 def _validate_oss_step(raw: str, harness_state: HarnessState) -> tuple[NextStepDiscriminatedOss | None, str]:
     try:
         return NextStepDiscriminatedOss.model_validate_json(raw), ""
@@ -980,6 +1090,13 @@ def _validate_oss_step(raw: str, harness_state: HarnessState) -> tuple[NextStepD
         payload, json_error = _parse_json_object(raw)
         if payload is None:
             return None, json_error or "invalid_json"
+        normalized_payload, normalizations = _normalize_oss_payload(payload)
+        if normalizations:
+            try:
+                step = NextStepDiscriminatedOss.model_validate(normalized_payload)
+                return step, "normalized:" + ",".join(normalizations)
+            except ValidationError:
+                payload = normalized_payload
         direct_step = _direct_respond_step(payload, harness_state)
         if direct_step is not None:
             return direct_step, "direct_respond_wrapped"
@@ -1004,6 +1121,7 @@ def _request_oss_step(
     )
     raw = _message_text(first_resp)
     metadata["raw_snippet"] = _raw_snippet(raw)
+    metadata["finish_reason"] = getattr(first_resp.choices[0], "finish_reason", None)
     prompt_tokens = _usage_value(first_resp.usage, "prompt_tokens")
     completion_tokens = _usage_value(first_resp.usage, "completion_tokens")
 
@@ -1011,6 +1129,9 @@ def _request_oss_step(
     if step is not None:
         if category:
             metadata["parse_error_category"] = category
+            if category.startswith("normalized:"):
+                metadata["oss_normalized"] = True
+                metadata["oss_normalizations"] = category.removeprefix("normalized:").split(",")
             if category == "direct_respond_wrapped":
                 metadata["event"] = "oss_parse_failure_fallback"
         return OssRequestResult(step, prompt_tokens, completion_tokens, metadata)
@@ -1031,6 +1152,7 @@ def _request_oss_step(
     )
     repair_raw = _message_text(repair_resp)
     metadata["repair_raw_snippet"] = _raw_snippet(repair_raw)
+    metadata["repair_finish_reason"] = getattr(repair_resp.choices[0], "finish_reason", None)
     metadata["raw_snippet"] = metadata["repair_raw_snippet"] or metadata["raw_snippet"]
     prompt_tokens = _usage_value(repair_resp.usage, "prompt_tokens") or prompt_tokens
     completion_tokens = _usage_value(repair_resp.usage, "completion_tokens") or completion_tokens
@@ -1038,6 +1160,10 @@ def _request_oss_step(
     step, repair_category = _validate_oss_step(repair_raw, harness_state)
     if step is not None:
         metadata["oss_repair_succeeded"] = True
+        if repair_category.startswith("normalized:"):
+            metadata["oss_normalized"] = True
+            metadata["oss_normalizations"] = repair_category.removeprefix("normalized:").split(",")
+            metadata["parse_error_category"] = "repair_normalized"
         if repair_category == "direct_respond_wrapped":
             metadata["parse_error_category"] = "direct_respond_wrapped"
             metadata["event"] = "oss_parse_failure_fallback"
@@ -1150,6 +1276,9 @@ def _dispatch_wiki_section_insert(
         "start_row": start_row,
         "end_row": end_row,
         "content_chars": len(content),
+        "before_slice": "\n".join(section_lines) + "\n",
+        "inserted_or_updated": content,
+        "after_slice": content,
     }
 
 
@@ -1295,9 +1424,13 @@ def run_agent(
         fn = step.function
         fn_type = fn.type
         if isinstance(fn, Req_Respond):
+            respond_model_payload = fn.model_dump(exclude_none=True, exclude={"type"})
             added_refs = _augment_respond_refs(fn, harness_state)
+            respond_augmented_payload = fn.model_dump(exclude_none=True, exclude={"type"})
         else:
             added_refs = 0
+            respond_model_payload = None
+            respond_augmented_payload = None
         fn_args = fn.model_dump_json(exclude_none=True, exclude={"type"})
         plan_text = _first_plan_item(step.plan)
         step_event.update({
@@ -1313,6 +1446,13 @@ def run_agent(
         })
         if added_refs:
             step_event["harness_ref_augmented"] = added_refs
+        if isinstance(fn, Req_Respond):
+            step_event["respond_trace"] = {
+                "model": respond_model_payload,
+                "augmented": respond_augmented_payload,
+                "dispatched": None,
+                "added_refs": added_refs,
+            }
         print(f"{CLI_CYAN}{fn_type}{CLI_CLR} - {plan_text}  ({elapsed_ms}ms)")
         print(f"    {CLI_YELLOW}args:{CLI_CLR} {fn_args[:300]}")
 
@@ -1456,6 +1596,8 @@ def run_agent(
             print(f"    {CLI_YELLOW}BLOCKED {harness_block['reason']}{CLI_CLR}")
             step_event["result"] = result_payload
             step_event["harness_block"] = harness_block["reason"]
+            if isinstance(fn, Req_Respond) and isinstance(step_event.get("respond_trace"), dict):
+                step_event["respond_trace"]["dispatch_blocked"] = harness_block["reason"]
             consecutive_blocked_steps += 1
         elif fn_type in WRITE_ACTION_TYPES and action_signature in successful_write_signatures:
             result_payload = {
@@ -1488,6 +1630,11 @@ def run_agent(
                     print(f"    {CLI_GREEN}->{CLI_CLR} {result_text[:200]}")
                     step_event["result"] = result_payload
                 else:
+                    if isinstance(fn, Req_Respond) and isinstance(step_event.get("respond_trace"), dict):
+                        step_event["respond_trace"]["dispatched"] = fn.model_dump(
+                            exclude_none=True,
+                            exclude={"type"},
+                        )
                     result = _api_retry(
                         f"maintenance API call {fn_type}",
                         lambda: maint.dispatch(fn),
