@@ -533,6 +533,10 @@ def _compact_oss_parse(step: dict[str, Any]) -> dict[str, Any]:
         payload["raw"] = _truncate(step["raw_snippet"], 300)
     if isinstance(step.get("repair_raw_snippet"), str) and step["repair_raw_snippet"]:
         payload["repair_raw"] = _truncate(step["repair_raw_snippet"], 300)
+    if isinstance(step.get("oss_tool_calls_snippet"), str) and step["oss_tool_calls_snippet"]:
+        payload["tool_calls"] = _truncate(step["oss_tool_calls_snippet"], 300)
+    if isinstance(step.get("oss_repair_tool_calls_snippet"), str) and step["oss_repair_tool_calls_snippet"]:
+        payload["repair_tool_calls"] = _truncate(step["oss_repair_tool_calls_snippet"], 300)
     return payload
 
 

@@ -25,11 +25,11 @@ from pydantic import BaseModel, Field, ValidationError
 from ogchallenge_client import CoreClient, MaintenanceClient, TaskInfo, ApiException
 from ogchallenge_client.dtos import (
     GroundRef,
-    Req_EquipmentList, Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
-    Req_EmployeeList, Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
-    Req_MaterialList, Req_MaterialGet, Req_MaterialSearch, Req_MaterialReorder,
+    Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
+    Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
+    Req_MaterialGet, Req_MaterialSearch,
     Req_NotifCreate, Req_NotifGet, Req_NotifSearch, Req_NotifUpdate,
-    Req_WOList, Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
+    Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
     Req_OperationAdd, Req_OperationUpdate, Req_OperationList,
     Req_WikiTree, Req_WikiLoad, Req_WikiSearch, Req_WikiUpdate,
     Req_Respond,
@@ -49,7 +49,6 @@ TRANSIENT_API_ERROR_CODES = {"network_error", "timeout", "rate_limit"}
 WRITE_ACTION_TYPES = {
     "equipment_update",
     "employee_update",
-    "material_reorder",
     "notif_create",
     "notif_update",
     "wo_create",
@@ -406,7 +405,6 @@ def _write_arg_ref_tokens(fn_type: str, args: dict[str, Any]) -> list[str]:
     arg_refs = {
         "equipment_update": (("equipment", "floc"),),
         "employee_update": (("employee", "emp_id"),),
-        "material_reorder": (("material", "mat_id"),),
         "notif_create": (("equipment", "floc"),),
         "notif_update": (("notification", "notif_id"),),
         "wo_create": (("notification", "notification_id"),),
@@ -706,11 +704,11 @@ def _augment_respond_refs(fn: Req_Respond, harness_state: HarnessState) -> int:
 
 
 Action = Union[
-    Req_EquipmentList, Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
-    Req_EmployeeList, Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
-    Req_MaterialList, Req_MaterialGet, Req_MaterialSearch, Req_MaterialReorder,
+    Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
+    Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
+    Req_MaterialGet, Req_MaterialSearch,
     Req_NotifCreate, Req_NotifGet, Req_NotifSearch, Req_NotifUpdate,
-    Req_WOList, Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
+    Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
     Req_OperationAdd, Req_OperationUpdate, Req_OperationList,
     Req_WikiTree, Req_WikiLoad, Req_WikiSearch, Req_WikiUpdate,
     Req_Respond,
@@ -726,11 +724,11 @@ class Req_WikiSectionInsert(BaseModel):
 
 
 OssAction = Union[
-    Req_EquipmentList, Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
-    Req_EmployeeList, Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
-    Req_MaterialList, Req_MaterialGet, Req_MaterialSearch, Req_MaterialReorder,
+    Req_GetEquipment, Req_UpdateEquipment, Req_EquipmentSearch,
+    Req_GetEmployee, Req_UpdateEmployee, Req_EmployeeSearch,
+    Req_MaterialGet, Req_MaterialSearch,
     Req_NotifCreate, Req_NotifGet, Req_NotifSearch, Req_NotifUpdate,
-    Req_WOList, Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
+    Req_WOSearch, Req_WOCreate, Req_WOGet, Req_WOUpdate,
     Req_OperationAdd, Req_OperationUpdate, Req_OperationList,
     Req_WikiTree, Req_WikiLoad, Req_WikiSearch, Req_WikiUpdate,
     Req_WikiSectionInsert,
@@ -842,23 +840,6 @@ def _first_plan_item(plan: Any) -> str:
     return "No plan provided."
 
 
-def _explicitly_requests_material_reorder(task_text: str) -> bool:
-    text = task_text.lower()
-    return any(
-        phrase in text
-        for phrase in (
-            "reorder",
-            "re-order",
-            "restock",
-            "re-stock",
-            "order material",
-            "order spare",
-            "procure",
-            "raise purchase",
-        )
-    )
-
-
 def _to_responses_input(log: list[dict]) -> list[dict]:
     """Convert internal chat-style log into Responses API input messages."""
     items: list[dict] = []
@@ -949,6 +930,24 @@ def _message_text(resp: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _tool_calls_snippet(resp: Any, *, limit: int = 500) -> str:
+    try:
+        tool_calls = resp.choices[0].message.tool_calls
+    except Exception:
+        return ""
+    if not tool_calls:
+        return ""
+    compact = []
+    for call in tool_calls[:3]:
+        fn = getattr(call, "function", None)
+        compact.append({
+            "type": getattr(call, "type", None),
+            "name": getattr(fn, "name", None),
+            "arguments": getattr(fn, "arguments", None),
+        })
+    return _raw_snippet(json.dumps(compact, ensure_ascii=False), limit=limit)
+
+
 def _raw_snippet(raw: str | None, *, limit: int = 500) -> str:
     return (raw or "")[:limit].replace("\r", " ").replace("\n", " ")
 
@@ -1009,7 +1008,6 @@ OSS_FUNCTION_PATH_ALIASES = {
     "notifications/update": "notif_update",
     "materials/search": "material_search",
     "materials/get": "material_get",
-    "materials/reorder": "material_reorder",
     "operations/list": "operation_list",
     "operations/add": "operation_add",
     "operations/update": "operation_update",
@@ -1025,6 +1023,26 @@ OSS_FUNCTION_TYPE_ALIASES = {
     "floc/search": "equipment_search",
     "floc/get": "equipment_get",
     "floc/update": "equipment_update",
+    "notifications_search": "notif_search",
+    "notifications_get": "notif_get",
+    "notifications_create": "notif_create",
+    "notifications_update": "notif_update",
+    "notification_search": "notif_search",
+    "notification_get": "notif_get",
+    "notification_create": "notif_create",
+    "notification_update": "notif_update",
+    "workorders_search": "wo_search",
+    "workorders_get": "wo_get",
+    "workorders_create": "wo_create",
+    "workorders_update": "wo_update",
+    "workorder_search": "wo_search",
+    "workorder_get": "wo_get",
+    "workorder_create": "wo_create",
+    "workorder_update": "wo_update",
+    "work_orders_search": "wo_search",
+    "work_orders_get": "wo_get",
+    "work_orders_create": "wo_create",
+    "work_orders_update": "wo_update",
 }
 
 
@@ -1079,6 +1097,28 @@ def _normalize_oss_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
                         fn["section_heading"] = value
                         changes.append(f"wiki_section_insert.{source}->section_heading")
                     break
+        if fn.get("type") == "respond" and not fn.get("message"):
+            for source in ("answer", "summary", "response"):
+                value = fn.get(source)
+                if isinstance(value, str) and value.strip():
+                    fn["message"] = value
+                    changes.append(f"respond.{source}->message")
+                    break
+            if not fn.get("message"):
+                for source in ("message", "answer", "summary"):
+                    value = normalized.get(source)
+                    if isinstance(value, str) and value.strip():
+                        fn["message"] = value
+                        changes.append(f"top_level.{source}->respond.message")
+                        break
+            if (
+                not fn.get("message")
+                and (normalized.get("ready_to_respond") is True or normalized.get("task_completed") is True)
+            ):
+                value = normalized.get("current_state")
+                if isinstance(value, str) and value.strip():
+                    fn["message"] = value
+                    changes.append("current_state->respond.message")
 
     return normalized, changes
 
@@ -1122,6 +1162,9 @@ def _request_oss_step(
     raw = _message_text(first_resp)
     metadata["raw_snippet"] = _raw_snippet(raw)
     metadata["finish_reason"] = getattr(first_resp.choices[0], "finish_reason", None)
+    tool_calls = _tool_calls_snippet(first_resp)
+    if tool_calls:
+        metadata["oss_tool_calls_snippet"] = tool_calls
     prompt_tokens = _usage_value(first_resp.usage, "prompt_tokens")
     completion_tokens = _usage_value(first_resp.usage, "completion_tokens")
 
@@ -1153,6 +1196,9 @@ def _request_oss_step(
     repair_raw = _message_text(repair_resp)
     metadata["repair_raw_snippet"] = _raw_snippet(repair_raw)
     metadata["repair_finish_reason"] = getattr(repair_resp.choices[0], "finish_reason", None)
+    repair_tool_calls = _tool_calls_snippet(repair_resp)
+    if repair_tool_calls:
+        metadata["oss_repair_tool_calls_snippet"] = repair_tool_calls
     metadata["raw_snippet"] = metadata["repair_raw_snippet"] or metadata["raw_snippet"]
     prompt_tokens = _usage_value(repair_resp.usage, "prompt_tokens") or prompt_tokens
     completion_tokens = _usage_value(repair_resp.usage, "completion_tokens") or completion_tokens
@@ -1259,6 +1305,7 @@ def _dispatch_wiki_section_insert(
     content = "\n".join(updated_section_lines) + "\n"
     update = Req_WikiUpdate(
         path=fn.path,
+        mode="replace_range",
         start_row=start_row,
         end_row=end_row,
         content=content,
@@ -1531,19 +1578,6 @@ def run_agent(
                     "write, or respond instead of repeating system."
                 ),
                 suggested_next="search_or_respond",
-            )
-        elif (
-            fn_type == "material_reorder"
-            and not _explicitly_requests_material_reorder(task.task_text)
-        ):
-            harness_block = _harness_block_payload(
-                reason="compensating_material_reorder_blocked",
-                message=(
-                    "The user did not explicitly request material reorder/restock. "
-                    "Do not perform a compensating reorder just to make another write possible; "
-                    "respond with the blocking stock issue or perform only the requested write if valid."
-                ),
-                suggested_next="respond_or_requested_write",
             )
         elif step.ready_to_respond and fn_type in WRITE_ACTION_TYPES:
             harness_block = _harness_block_payload(

@@ -1,5 +1,23 @@
 # Harness Versions
 
+## 2.7
+
+- Added OSS-only underscore action aliases for notification and work-order
+  near-miss names.
+- Added safe OSS `respond.message` normalization from answer/summary/response
+  fields and completed-response state.
+- Logged compact OSS tool-call snippets when OpenRouter returns tool-call
+  shaped repair output without JSON content.
+
+## 2.6
+
+- Aligned model-selectable action DTOs with arc-ogchallenge 0.8.5.
+- Removed deprecated broad-list and material-reorder actions from structured
+  planning schemas and OSS aliases.
+- Updated runtime prompt for the current outcome/action contract.
+- Made OSS wiki section insert dispatch use explicit `wiki_update`
+  `replace_range` mode.
+
 ## 2.5
 
 - Added OpenRouter gpt-oss schema-alias normalization for known wrapper/action

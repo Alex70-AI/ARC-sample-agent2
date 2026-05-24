@@ -5,3 +5,6 @@
 venv
 uv.lock
 logs/
+.compare/
+bitgn-master/
+bitgn-agent/

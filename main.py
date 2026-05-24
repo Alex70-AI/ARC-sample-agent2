@@ -8,6 +8,9 @@ Usage:
     # Run a single task by spec_id (development mode)
     python main.py --spec notification_raise
 
+    # Run a single task by platform task code or spec_id
+    python main.py --task notification_raise
+
 Environment variables (see .env.example):
     ARC_BASE_URL       - ARC server URL (default: https://agentreliabilitychallenge.com)
     ARC_API_KEY        - API key for the platform
@@ -301,18 +304,18 @@ def run_session(
 
 def run_single_task(
     api: CoreClient,
-    spec_id: str,
+    task: str,
     llm_config: LLMConfig,
     *,
     run_logger: RunLogger | None = None,
 ) -> None:
-    """Start a standalone task by spec_id (for development/testing)."""
+    """Start a standalone task by task code or spec_id."""
     print(
-        f"Starting standalone task: spec={spec_id!r}, provider={llm_config.provider!r}, model={llm_config.model!r}\n"
+        f"Starting standalone task: task={task!r}, provider={llm_config.provider!r}, model={llm_config.model!r}\n"
     )
     task_info = _api_retry(
         "start_new_task",
-        lambda: api.start_new_task(benchmark="maintenance-ops", spec_id=spec_id),
+        lambda: api.start_new_task(benchmark="maintenance-ops", task=task),
     )
     if run_logger:
         run_logger.start_task(task_info)
@@ -343,23 +346,26 @@ def run_single_task(
         print(f"\nStatus: {result.status}")
     if run_logger:
         run_logger.finish_task(**task_result)
-        run_logger.finish(spec_id=spec_id, **task_result)
+        run_logger.finish(spec_id=task, **task_result)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="ARC sample agent")
-    parser.add_argument("--spec", help="Run a single task by spec_id (skips session)")
+    single = parser.add_mutually_exclusive_group()
+    single.add_argument("--task", help="Run a single task by task code or spec_id (skips session)")
+    single.add_argument("--spec", help="Alias for --task, kept for compatibility")
     parser.add_argument("--workspace", default="dev", help="Session workspace tag (default: dev)")
     parser.add_argument("--no-log", action="store_true", help="Disable local JSON run logging")
     parser.add_argument("--log-root", default="logs", help="Local JSON log root (default: logs)")
     args = parser.parse_args()
+    task_input = args.task or args.spec
 
     print(f"Harness version: {load_harness_version()}")
 
     run_logger = None
     if not args.no_log:
         run_logger = RunLogger(
-            mode="task" if args.spec else "batch",
+            mode="task" if task_input else "batch",
             root=args.log_root,
             model=os.getenv("MODEL_ID", DEFAULT_MODEL_ID).strip(),
         )
@@ -373,7 +379,7 @@ def main() -> None:
                 provider=llm_config.provider,
                 model=llm_config.model,
                 workspace=args.workspace,
-                spec=args.spec,
+                spec=task_input,
             )
         _preflight_platform(api)
         _preflight_llm(llm_config)
@@ -391,8 +397,8 @@ def main() -> None:
         raise SystemExit(2) from exc
 
     try:
-        if args.spec:
-            run_single_task(api, args.spec, llm_config, run_logger=run_logger)
+        if task_input:
+            run_single_task(api, task_input, llm_config, run_logger=run_logger)
         else:
             run_session(api, workspace=args.workspace, llm_config=llm_config, run_logger=run_logger)
     except Exception as exc:
@@ -405,4 +411,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
