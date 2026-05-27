@@ -6,6 +6,7 @@
   `error_internal` to `none_clarification_needed`.
 - Grounded no-write forced clarification responses with write, read, and support
   refs so clarification outcomes keep available evidence.
+- Added a prompt-only write-scope rule to avoid echoing unrelated fields in updates.
 
 ## 2.6
 

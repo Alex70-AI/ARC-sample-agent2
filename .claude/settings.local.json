@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "PowerShell(cd \"$env:USERPROFILE\\\\.claude\"; git clone https://github.com/AgriciDaniel/claude-seo.git seo-skills)"
+    ]
+  }
+}
