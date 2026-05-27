@@ -720,6 +720,12 @@ def _model_log_suffix(model: str | None) -> str:
     raw = model.strip().lower().split("/")[-1]
     raw = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", raw)
 
+    explicit = {
+        "qwen3.5-397b-a17b": "q397",
+    }
+    if raw in explicit:
+        return explicit[raw]
+
     if "nemotron" in raw:
         return "nmtr"
 

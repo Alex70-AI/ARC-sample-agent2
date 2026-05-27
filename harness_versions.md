@@ -1,13 +1,11 @@
 # Harness Versions
 
-## 2.7
+## 3.0
 
-- Added OSS-only underscore action aliases for notification and work-order
-  near-miss names.
-- Added safe OSS `respond.message` normalization from answer/summary/response
-  fields and completed-response state.
-- Logged compact OSS tool-call snippets when OpenRouter returns tool-call
-  shaped repair output without JSON content.
+- Changed repeated blocked/non-progress no-write auto-responses from
+  `error_internal` to `none_clarification_needed`.
+- Grounded no-write forced clarification responses with write, read, and support
+  refs so clarification outcomes keep available evidence.
 
 ## 2.6
 
@@ -17,6 +15,12 @@
 - Updated runtime prompt for the current outcome/action contract.
 - Made OSS wiki section insert dispatch use explicit `wiki_update`
   `replace_range` mode.
+- Added OSS-only underscore action aliases for notification and work-order
+  near-miss names.
+- Added safe OSS `respond.message` normalization from answer/summary/response
+  fields and completed-response state.
+- Logged compact OSS tool-call snippets when OpenRouter returns tool-call
+  shaped repair output without JSON content.
 
 ## 2.5
 

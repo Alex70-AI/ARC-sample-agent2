@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "updated_at": "2026-05-22",
+  "updated_at": "2026-05-25",
   "currency": "USD",
   "unit": "1M tokens",
   "sources": {
@@ -89,21 +89,24 @@
       "cached_input_per_1m": 0.25,
       "output_per_1m": 3.49
     },
+    "mistralai/mistral-medium-3-5": {
+      "input_per_1m": 1.5,
+      "output_per_1m": 7.5
+    },
     "qwen/qwen3.6-plus": {
       "input_per_1m": 0.325,
       "cached_input_per_1m": 0.0325,
       "output_per_1m": 1.95
+    },
+    "qwen/qwen3.5-397b-a17b": {
+      "input_per_1m": 0.6,
+      "output_per_1m": 3.6
     },
     "google/gemini-3-flash-preview": {
       "input_per_1m": 0.5,
       "cached_input_per_1m": 0.05,
       "cache_write_per_1m": 0.08333,
       "output_per_1m": 3.0
-    },
-    "x-ai/grok-4.20": {
-      "input_per_1m": 1.25,
-      "cached_input_per_1m": 0.2,
-      "output_per_1m": 2.5
     }
   },
   "providers": {
@@ -137,9 +140,10 @@
         "deepseek/deepseek-v3.2": "deepseek/deepseek-v3.2",
         "deepseek/deepseek-v4-pro": "deepseek/deepseek-v4-pro",
         "moonshotai/kimi-k2.6": "moonshotai/kimi-k2.6",
+        "mistralai/mistral-medium-3-5": "mistralai/mistral-medium-3-5",
         "qwen/qwen3.6-plus": "qwen/qwen3.6-plus",
+        "qwen/qwen3.5-397b-a17b": "qwen/qwen3.5-397b-a17b",
         "google/gemini-3-flash-preview": "google/gemini-3-flash-preview",
-        "x-ai/grok-4.20": "x-ai/grok-4.20",
         "nvidia/nemotron-3-super-120b-a12b:free": "nvidia/nemotron-3-super-120b-a12b:free"
       }
     }

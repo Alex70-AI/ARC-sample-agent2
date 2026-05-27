@@ -1752,18 +1752,26 @@ def run_agent(
                 consecutive_blocked_steps = 0
                 print(f"\n  {CLI_YELLOW}Entering force-respond mode after successful write.{CLI_CLR}")
                 continue
-            auto_outcome = "ok_answer" if harness_state.writes_completed > 0 else "error_internal"
+            auto_outcome = "ok_answer" if harness_state.writes_completed > 0 else "none_clarification_needed"
             auto_message = (
                 "The requested write appears to have completed, but the run repeatedly selected "
                 "blocked or non-progress actions after completion."
                 if auto_outcome == "ok_answer"
-                else "I could not complete the task because the run repeatedly selected "
+                else "The run could not confirm a definitive answer after repeated "
                 "blocked or non-progress actions."
             )
+            if auto_outcome == "ok_answer":
+                auto_ref_tokens = harness_state.write_refs or []
+            else:
+                auto_ref_tokens = [
+                    *(harness_state.write_refs or []),
+                    *(harness_state.read_refs or []),
+                    *(harness_state.support_refs or []),
+                ]
             auto_fn = Req_Respond(
                 message=auto_message,
                 outcome=auto_outcome,
-                ground_refs=_ground_refs_from_tokens(harness_state.write_refs or []),
+                ground_refs=_ground_refs_from_tokens(auto_ref_tokens),
             )
             try:
                 _api_retry(
